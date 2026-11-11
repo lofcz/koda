@@ -1,6 +1,7 @@
 const paths: Record<string, string> = {
   select: 'm5 3 14 9-7 1-3 7Z',
   crop: 'M6 3v15h15M3 6h15v15',
+  image: 'M3 4h18v16H3ZM3 16l6-6 5 5 3-3 4 4M16 8h.01',
   resize: 'M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5M4 4l6 6m10 10-6-6',
   draw: 'm4 16 12-12 4 4L8 20H4Zm10-10 4 4',
   text: 'M4 5h16M12 5v15M8 20h8M4 5v3m16-3v3',

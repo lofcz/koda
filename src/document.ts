@@ -36,3 +36,23 @@ export {
   textIndexAt,
 } from './textLayout';
 export type { TextLayout, TextLine, TextSpan, TextMeasure } from './textLayout';
+export {
+  parseCropOptions,
+  constrainCropRect,
+  constrainImageToCrop,
+  applyCrop,
+  transformImage,
+  sourceBounds,
+  sourceContainsRect,
+  cropOutputSize,
+  CropConstraintError,
+} from './crop';
+export type {
+  CropOptions,
+  CropPreset,
+  CropGuides,
+  CropSource,
+  CropSize,
+  CropIntent,
+  ResolvedCropOptions,
+} from './crop';

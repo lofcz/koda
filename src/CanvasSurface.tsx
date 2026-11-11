@@ -16,6 +16,7 @@ import {
   ImageDocument,
   inverse,
   Layer,
+  Matrix,
   layerCorners,
   multiply,
   pathLayer,
@@ -23,6 +24,7 @@ import {
   Rect,
   resizeLayer,
   rotateLayer,
+  scale,
   ShapeKind,
   transform,
   translate,
@@ -50,7 +52,22 @@ import {
   transformLayers,
   withPathPoints,
 } from './interactions';
-import { fitTextLayer, fitView, paintDocument, View, zoomAt } from './render';
+import {
+  fitTextLayer,
+  fitView,
+  paintCropPreview,
+  paintDocument,
+  View,
+  zoomAt,
+} from './render';
+import {
+  constrainCropRect,
+  constrainImageToCrop,
+  cropOutputSize,
+  CropConstraintError,
+  transformImage,
+  type CropOptions,
+} from './crop';
 import { resolveTextStyle, textContent } from './textModel';
 import {
   RichTextInput,
@@ -72,6 +89,10 @@ export interface SurfaceActions {
   editPath(id: string): void;
   finishPath(closed?: boolean): void;
   deletePathPoint(): void;
+  cropZoom(factor: number): void;
+  cropRecenter(): void;
+  fitCrop(): void;
+  finishCropGesture(): void;
 }
 export type PathState = {
   drawing: boolean;
@@ -94,6 +115,7 @@ type Props = {
   };
   crop: Rect;
   cropRatio: number | null;
+  cropOptions?: CropOptions;
   compare?: boolean;
   snap?: boolean;
   shape?: ShapeKind | 'path' | null;
@@ -124,7 +146,28 @@ type Gesture =
     }
   | { type: 'marquee'; start: Point; ids: readonly string[]; additive: boolean }
   | { type: 'path-tap' }
-  | { type: 'crop'; start: Point; rect: Rect; mode: CropMode }
+  | {
+      type: 'crop';
+      base: ImageDocument;
+      start: Point;
+      rect: Rect;
+      mode: CropMode;
+    }
+  | {
+      type: 'crop-image';
+      base: ImageDocument;
+      rollback: ImageDocument;
+      start: Point;
+      rect: Rect;
+    }
+  | {
+      type: 'crop-pinch';
+      base: ImageDocument;
+      rollback: ImageDocument;
+      center: Point;
+      distance: number;
+      rect: Rect;
+    }
   | { type: 'pinch'; view: View; center: Point; distance: number };
 type PathDraft = {
   base: ImageDocument;
@@ -165,6 +208,7 @@ const cropCursor = (mode: CropMode) =>
 const isTyping = (target: EventTarget | null) =>
   target instanceof HTMLElement &&
   !!target.closest('input,textarea,select,[contenteditable="true"]');
+const DEFAULT_CROP_OPTIONS: CropOptions = {};
 
 export const CanvasSurface = forwardRef<SurfaceActions, Props>(
   function CanvasSurface(
@@ -177,6 +221,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       brush,
       crop,
       cropRatio,
+      cropOptions = DEFAULT_CROP_OPTIONS,
       compare = false,
       snap = true,
       shape,
@@ -231,6 +276,90 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     );
     const image = engine.image?.source,
       instructionsId = useId();
+    const cropState = useRef({ tool, crop, options: cropOptions });
+    useLayoutEffect(() => {
+      cropState.current = { tool, crop, options: cropOptions };
+    }, [tool, crop, cropOptions]);
+    const previewCropImage = useCallback(
+      (
+        base: ImageDocument,
+        matrix: Matrix,
+        rect: Rect,
+        options: CropOptions
+      ) => {
+        const source = engine.image;
+        if (!source) return;
+        try {
+          const next = constrainImageToCrop(
+            matrix,
+            source,
+            rect,
+            options.allowOutsideImage
+          );
+          engine.preview(
+            transformImage(base, multiply(next, inverse(base.imageMatrix)))
+          );
+        } catch (error) {
+          if (!(error instanceof CropConstraintError)) throw error;
+          // Keep the last valid preview when an extreme gesture cannot satisfy bounds.
+        }
+      },
+      [engine]
+    );
+    const zoomCrop = useCallback(
+      (factor: number, anchor?: Point) => {
+        const current = engine.getSnapshot().document,
+          state = cropState.current;
+        if (
+          !current ||
+          state.tool !== 'crop' ||
+          state.options.enableZoom === false ||
+          !Number.isFinite(factor) ||
+          factor <= 0
+        )
+          return;
+        const center = anchor ?? {
+          x: state.crop.x + state.crop.width / 2,
+          y: state.crop.y + state.crop.height / 2,
+        };
+        const limited = Math.max(0.01, Math.min(100, factor));
+        previewCropImage(
+          current,
+          multiply(
+            multiply(
+              translate(center.x, center.y),
+              multiply(scale(limited), translate(-center.x, -center.y))
+            ),
+            current.imageMatrix
+          ),
+          state.crop,
+          state.options
+        );
+      },
+      [engine, previewCropImage]
+    );
+    const recenterCrop = useCallback(() => {
+      const current = engine.getSnapshot().document,
+        source = engine.image,
+        state = cropState.current;
+      if (!current || !source || state.tool !== 'crop') return;
+      const center = transform(current.imageMatrix, {
+        x: source.width / 2,
+        y: source.height / 2,
+      });
+      previewCropImage(
+        current,
+        multiply(
+          translate(
+            state.crop.x + state.crop.width / 2 - center.x,
+            state.crop.y + state.crop.height / 2 - center.y
+          ),
+          current.imageMatrix
+        ),
+        state.crop,
+        state.options
+      );
+    }, [engine, previewCropImage]);
     const updateView = useCallback((next: View, isFit = false) => {
       fitted.current = isFit;
       viewRef.current = next;
@@ -244,20 +373,53 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       if (!node) return;
       const wheel = (event: WheelEvent) => {
         if (isTyping(event.target)) return;
-        event.preventDefault();
         if (gesture.current) return;
         const rect = node.getBoundingClientRect();
+        const p = { x: event.clientX - rect.left, y: event.clientY - rect.top },
+          state = cropState.current;
+        if (
+          state.tool === 'crop' &&
+          state.options.interactionFocus === 'image'
+        ) {
+          const q = {
+            x: (p.x - viewRef.current.x) / viewRef.current.zoom,
+            y: (p.y - viewRef.current.y) / viewRef.current.zoom,
+          };
+          if (
+            state.options.enableZoom === false ||
+            q.x < state.crop.x ||
+            q.y < state.crop.y ||
+            q.x > state.crop.x + state.crop.width ||
+            q.y > state.crop.y + state.crop.height
+          )
+            return;
+          event.preventDefault();
+          zoomCrop(
+            Math.exp(
+              -event.deltaY *
+                (event.deltaMode === 1
+                  ? 32
+                  : event.deltaMode === 2
+                    ? size.height
+                    : 1) *
+                0.002
+            ),
+            q
+          );
+          return;
+        }
+        event.preventDefault();
         updateView(
           zoomAt(
             viewRef.current,
             viewRef.current.zoom * Math.exp(-event.deltaY * 0.002),
-            { x: event.clientX - rect.left, y: event.clientY - rect.top }
+            p
           )
         );
       };
       node.addEventListener('wheel', wheel, { passive: false });
       return () => node.removeEventListener('wheel', wheel);
-    }, [updateView]);
+    }, [updateView, zoomCrop, size.height]);
     useLayoutEffect(() => {
       const node = host.current;
       if (!node) return;
@@ -455,7 +617,12 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     }, [doc.layers, editingPath, nodeIndex, selection]);
     const cancel = useCallback(() => {
       const current = gesture.current;
-      if (current?.type === 'crop') onCrop(current.rect);
+      if (current?.type === 'crop') {
+        onCrop(current.rect);
+        engine.preview(current.base);
+      }
+      if (current?.type === 'crop-image' || current?.type === 'crop-pinch')
+        engine.preview(current.rollback);
       if (current?.type === 'marquee') engine.selectMany(current.ids);
       if (current?.type === 'pan' || current?.type === 'pinch')
         updateView(current.view);
@@ -467,10 +634,10 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       setPathHover(null);
       setMarquee(null);
       finishText(true);
-      engine.cancel();
+      if (tool !== 'crop') engine.cancel();
       setGuides([]);
       setCursor('default');
-    }, [engine, finishText, onCrop, updateView]);
+    }, [engine, finishText, onCrop, updateView, tool]);
     const beginText = useCallback(
       (id: string) => {
         finishPath();
@@ -512,6 +679,23 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         editPath,
         finishPath,
         deletePathPoint,
+        cropZoom: zoomCrop,
+        cropRecenter: recenterCrop,
+        fitCrop: () => {
+          const rect = cropState.current.crop;
+          const fitted = fitView(rect, size.width, size.height);
+          updateView({
+            ...fitted,
+            x: fitted.x - rect.x * fitted.zoom,
+            y: fitted.y - rect.y * fitted.zoom,
+          });
+        },
+        finishCropGesture: () => {
+          gesture.current = null;
+          pointers.current.clear();
+          keyboardTransaction.current = false;
+          setGuides([]);
+        },
         actualSize: () =>
           updateView(
             zoomAt(viewRef.current, 1, {
@@ -535,11 +719,31 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         editPath,
         finishPath,
         deletePathPoint,
+        zoomCrop,
+        recenterCrop,
         size,
         updateView,
       ]
     );
     useEffect(() => () => engine.cancel(), [engine]);
+    useEffect(
+      () =>
+        engine.subscribe(() => {
+          const current = gesture.current;
+          if (
+            current &&
+            ['crop', 'crop-image', 'crop-pinch'].includes(current.type) &&
+            (!engine.inTransaction || engine.getSnapshot().phase !== 'ready')
+          ) {
+            // A no-op restore can end the draft without emitting a change event.
+            // Drop captured coordinates synchronously before the tool cleanup runs.
+            gesture.current = null;
+            pointers.current.clear();
+            setGuides([]);
+          }
+        }),
+      [engine]
+    );
     useEffect(
       () =>
         engine.subscribeChanges(() => {
@@ -590,12 +794,12 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         if (gesture.current) cancel();
         if (keyboardTransaction.current) {
           keyboardTransaction.current = false;
-          engine.end();
+          if (tool !== 'crop') engine.end();
         }
       };
       window.addEventListener('blur', reset);
       return () => window.removeEventListener('blur', reset);
-    }, [cancel, engine]);
+    }, [cancel, engine, tool]);
 
     useLayoutEffect(() => {
       const canvas = lower.current;
@@ -625,14 +829,31 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      paintDocument(
-        ctx,
-        displayDocument,
-        image,
-        [view.zoom, 0, 0, view.zoom, view.x, view.y],
-        engine.assets
-      );
-    }, [doc, image, view, size, compare, editing, engine]);
+      if (tool === 'crop' && !compare) {
+        ctx.save();
+        ctx.transform(view.zoom, 0, 0, view.zoom, view.x, view.y);
+        paintCropPreview(ctx, doc, image, crop, engine.assets, cropOptions);
+        ctx.restore();
+      } else
+        paintDocument(
+          ctx,
+          displayDocument,
+          image,
+          [view.zoom, 0, 0, view.zoom, view.x, view.y],
+          engine.assets
+        );
+    }, [
+      doc,
+      image,
+      view,
+      size,
+      compare,
+      editing,
+      engine,
+      tool,
+      crop,
+      cropOptions,
+    ]);
 
     useLayoutEffect(() => {
       const overlay = upper.current;
@@ -672,29 +893,76 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         const a = screen(crop, view),
           w = crop.width * view.zoom,
           h = crop.height * view.zoom;
-        ui.fillStyle = 'rgba(5,12,20,.66)';
+        ui.fillStyle = `rgba(5,12,20,${cropOptions.maskOpacity ?? 0.75})`;
         ui.beginPath();
         ui.rect(0, 0, size.width, size.height);
         ui.rect(a.x, a.y, w, h);
         ui.fill('evenodd');
         ui.strokeStyle = 'rgba(255,255,255,.48)';
         ui.lineWidth = 1;
-        for (let i = 1; i < 3; i++) {
+        const guides = cropOptions.guides ?? 'thirds';
+        const stops =
+          typeof guides === 'object'
+            ? guides
+            : {
+                columns:
+                  guides === 'grid'
+                    ? [0.25, 0.5, 0.75]
+                    : guides === 'thirds'
+                      ? [1 / 3, 2 / 3]
+                      : [],
+                rows:
+                  guides === 'grid'
+                    ? [0.25, 0.5, 0.75]
+                    : guides === 'thirds'
+                      ? [1 / 3, 2 / 3]
+                      : [],
+              };
+        for (const stop of stops.columns) {
           ui.beginPath();
-          ui.moveTo(a.x + (w * i) / 3, a.y);
-          ui.lineTo(a.x + (w * i) / 3, a.y + h);
-          ui.moveTo(a.x, a.y + (h * i) / 3);
-          ui.lineTo(a.x + w, a.y + (h * i) / 3);
+          ui.moveTo(a.x + w * stop, a.y);
+          ui.lineTo(a.x + w * stop, a.y + h);
+          ui.stroke();
+        }
+        for (const stop of stops.rows) {
+          ui.beginPath();
+          ui.moveTo(a.x, a.y + h * stop);
+          ui.lineTo(a.x + w, a.y + h * stop);
+          ui.stroke();
+        }
+        if (guides === 'diagonals') {
+          path([a, { x: a.x + w, y: a.y + h }], false);
+          ui.stroke();
+          path(
+            [
+              { x: a.x + w, y: a.y },
+              { x: a.x, y: a.y + h },
+            ],
+            false
+          );
           ui.stroke();
         }
         ui.strokeStyle = '#fff';
         ui.lineWidth = 1.5;
         ui.strokeRect(a.x, a.y, w, h);
-        for (const { handle: name, point } of cropHandles(crop)) {
+        for (const { handle: name, point } of cropOptions.handleStyle ===
+        'invisible'
+          ? []
+          : cropHandles(crop)) {
           const p = screen(point, view);
           ui.lineWidth = 3;
           ui.beginPath();
           if (name.length === 2) {
+            if (cropOptions.handleStyle !== 'hook') {
+              ui.fillStyle = '#fff';
+              ui.strokeStyle = '#1f2937';
+              ui.lineWidth = 1;
+              ui.arc(p.x, p.y, 5, 0, Math.PI * 2);
+              ui.fill();
+              ui.stroke();
+              ui.strokeStyle = '#fff';
+              continue;
+            }
             const dx = name.includes('w') ? 1 : -1,
               dy = name.includes('n') ? 1 : -1;
             ui.moveTo(p.x + dx * Math.min(18, w / 4), p.y);
@@ -709,24 +977,30 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           }
           ui.stroke();
         }
-        const label = `${Math.round(crop.width)} × ${Math.round(crop.height)}`;
-        ui.font = '500 12px system-ui, sans-serif';
-        const labelWidth = ui.measureText(label).width + 18,
-          labelX = Math.max(
-            4,
-            Math.min(size.width - labelWidth - 4, a.x + w / 2 - labelWidth / 2)
-          ),
-          labelY =
-            a.y + h + 32 < size.height
-              ? a.y + h + 8
-              : Math.max(4, a.y + h - 32);
-        ui.fillStyle = 'rgba(15,23,42,.82)';
-        ui.beginPath();
-        ui.roundRect(labelX, labelY, labelWidth, 24, 6);
-        ui.fill();
-        ui.fillStyle = '#fff';
-        ui.textBaseline = 'middle';
-        ui.fillText(label, labelX + 9, labelY + 12);
+        if (cropOptions.showSize !== false) {
+          const output = cropOutputSize(crop, cropOptions);
+          const label = `${output.width} × ${output.height}`;
+          ui.font = '500 12px system-ui, sans-serif';
+          const labelWidth = ui.measureText(label).width + 18,
+            labelX = Math.max(
+              4,
+              Math.min(
+                size.width - labelWidth - 4,
+                a.x + w / 2 - labelWidth / 2
+              )
+            ),
+            labelY =
+              a.y + h + 32 < size.height
+                ? a.y + h + 8
+                : Math.max(4, a.y + h - 32);
+          ui.fillStyle = 'rgba(15,23,42,.82)';
+          ui.beginPath();
+          ui.roundRect(labelX, labelY, labelWidth, 24, 6);
+          ui.fill();
+          ui.fillStyle = '#fff';
+          ui.textBaseline = 'middle';
+          ui.fillText(label, labelX + 9, labelY + 12);
+        }
       } else if (!editing) {
         const hovered = doc.layers.find(
           (item) => item.id === hover && !selection.includes(item.id)
@@ -882,6 +1156,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       group,
       tool,
       crop,
+      cropOptions,
       guides,
       compare,
       editing,
@@ -1069,14 +1344,42 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         q = imagePoint(p);
       pointers.current.set(event.pointerId, p);
       if (pointers.current.size === 2) {
-        if (gesture.current?.type === 'crop') onCrop(gesture.current.rect);
+        const previous = gesture.current;
+        if (previous?.type === 'crop') {
+          onCrop(previous.rect);
+          engine.preview(previous.base);
+        }
+        if (
+          tool === 'crop' &&
+          cropOptions.interactionFocus === 'image' &&
+          !space.current
+        ) {
+          const base = engine.getSnapshot().document;
+          if (!base) return;
+          const [a, b] = [...pointers.current.values()];
+          gesture.current = {
+            type: 'crop-pinch',
+            base,
+            rollback:
+              previous?.type === 'crop-image' || previous?.type === 'crop-pinch'
+                ? previous.rollback
+                : previous?.type === 'crop'
+                  ? previous.base
+                  : base,
+            center: imagePoint(midpoint(a, b)),
+            distance: Math.max(1, distance(a, b)),
+            rect: previous?.type === 'crop' ? previous.rect : crop,
+          };
+          setCursor('grabbing');
+          return;
+        }
         if (gesture.current?.type === 'marquee')
           engine.selectMany(gesture.current.ids);
         pathDraftRef.current = null;
         setPathDraft(null);
         setPathHover(null);
         setMarquee(null);
-        engine.cancel();
+        if (tool !== 'crop') engine.cancel();
         setGuides([]);
         const [a, b] = [...pointers.current.values()];
         gesture.current = {
@@ -1096,8 +1399,23 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       }
       if (tool === 'crop') {
         const mode = cropModeAt(p, q, event.pointerType === 'touch');
-        gesture.current = { type: 'crop', start: q, rect: crop, mode };
-        setCursor(cropCursor(mode));
+        const base = engine.getSnapshot().document ?? doc;
+        if (
+          cropOptions.interactionFocus === 'image' &&
+          (mode === 'move' || mode === 'new')
+        ) {
+          gesture.current = {
+            type: 'crop-image',
+            base,
+            rollback: base,
+            start: q,
+            rect: crop,
+          };
+          setCursor('grabbing');
+        } else {
+          gesture.current = { type: 'crop', base, start: q, rect: crop, mode };
+          setCursor(cropCursor(mode));
+        }
         return;
       }
       if (pathDraftRef.current) {
@@ -1268,8 +1586,15 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       if (!g || !pointers.current.has(event.pointerId)) {
         if (compare) return;
         if (space.current) setCursor('grab');
-        else if (tool === 'crop') setCursor(cropCursor(cropModeAt(p, q)));
-        else if (tool === 'draw') setCursor('crosshair');
+        else if (tool === 'crop') {
+          const mode = cropModeAt(p, q);
+          setCursor(
+            cropOptions.interactionFocus === 'image' &&
+              (mode === 'move' || mode === 'new')
+              ? 'grab'
+              : cropCursor(mode)
+          );
+        } else if (tool === 'draw') setCursor('crosshair');
         else {
           const handle = selectedHandle(p),
             node = pathHandle(p),
@@ -1290,6 +1615,38 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       }
       pointers.current.set(event.pointerId, p);
       if (g.type === 'path-tap') return;
+      if (g.type === 'crop-image') {
+        previewCropImage(
+          g.base,
+          multiply(
+            translate(q.x - g.start.x, q.y - g.start.y),
+            g.base.imageMatrix
+          ),
+          g.rect,
+          cropOptions
+        );
+        return;
+      }
+      if (g.type === 'crop-pinch') {
+        if (pointers.current.size < 2) return;
+        const [a, b] = [...pointers.current.values()],
+          center = imagePoint(midpoint(a, b));
+        const factor =
+          cropOptions.enableZoom === false
+            ? 1
+            : Math.max(0.01, Math.min(100, distance(a, b) / g.distance));
+        const delta = multiply(
+          translate(center.x, center.y),
+          multiply(scale(factor), translate(-g.center.x, -g.center.y))
+        );
+        previewCropImage(
+          g.base,
+          multiply(delta, g.base.imageMatrix),
+          g.rect,
+          cropOptions
+        );
+        return;
+      }
       if (g.type === 'marquee') {
         const rect = rectFromPoints(g.start, q),
           ids = marqueeLayers(doc, rect);
@@ -1371,16 +1728,52 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         return;
       }
       if (g.type === 'crop') {
-        onCrop(
-          dragCrop(
-            g.rect,
-            g.start,
-            q,
-            g.mode,
-            doc,
-            event.shiftKey ? 1 : cropRatio
-          )
-        );
+        const source = engine.image;
+        if (!source) return;
+        const ratio =
+          cropOptions.aspectRatio ?? (event.shiftKey ? 1 : cropRatio);
+        const next = dragCrop(g.rect, g.start, q, g.mode, null, ratio);
+        const anchor =
+          g.mode === 'move'
+            ? undefined
+            : {
+                x:
+                  g.mode === 'new'
+                    ? q.x < g.start.x
+                      ? 1
+                      : 0
+                    : g.mode.includes('w')
+                      ? 1
+                      : g.mode.includes('e')
+                        ? 0
+                        : 0.5,
+                y:
+                  g.mode === 'new'
+                    ? q.y < g.start.y
+                      ? 1
+                      : 0
+                    : g.mode.includes('n')
+                      ? 1
+                      : g.mode.includes('s')
+                        ? 0
+                        : 0.5,
+              };
+        try {
+          onCrop(
+            constrainCropRect(
+              next,
+              {
+                width: source.width,
+                height: source.height,
+                matrix: g.base.imageMatrix,
+              },
+              cropOptions,
+              { aspectRatio: ratio, anchor }
+            )
+          );
+        } catch (error) {
+          if (!(error instanceof CropConstraintError)) throw error;
+        }
         return;
       }
       if (g.type === 'node') {
@@ -1475,7 +1868,15 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         engine.preview({ ...g.base, layers: [...g.base.layers, stroke(g)] });
       if (
         g &&
-        !['pan', 'pinch', 'crop', 'marquee', 'path-tap'].includes(g.type)
+        ![
+          'pan',
+          'pinch',
+          'crop',
+          'crop-image',
+          'crop-pinch',
+          'marquee',
+          'path-tap',
+        ].includes(g.type)
       )
         engine.end();
       if (
@@ -1488,17 +1889,27 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       pointers.current.delete(event.pointerId);
       // A remaining finger continues panning after a pinch without drawing an accidental stroke.
       gesture.current =
-        g?.type === 'pinch' && pointers.current.size === 1
+        g?.type === 'crop-pinch' && pointers.current.size === 1
           ? {
-              type: 'pan',
-              start: [...pointers.current.values()][0],
-              view: viewRef.current,
+              type: 'crop-image',
+              base: engine.getSnapshot().document ?? g.base,
+              rollback: g.rollback,
+              start: imagePoint([...pointers.current.values()][0]),
+              rect: g.rect,
             }
-          : null;
+          : g?.type === 'pinch' && pointers.current.size === 1
+            ? {
+                type: 'pan',
+                start: [...pointers.current.values()][0],
+                view: viewRef.current,
+              }
+            : null;
       setGuides([]);
       setMarquee(null);
       setCursor(
-        space.current || gesture.current?.type === 'pan'
+        space.current ||
+          gesture.current?.type === 'pan' ||
+          gesture.current?.type === 'crop-image'
           ? 'grab'
           : tool === 'draw'
             ? 'crosshair'
@@ -1554,6 +1965,11 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         return;
       }
       if (event.key === '+' || event.key === '=' || event.key === '-') {
+        if (tool === 'crop' && cropOptions.interactionFocus === 'image') {
+          zoomCrop(event.key === '-' ? 0.8 : 1.25);
+          event.preventDefault();
+          return;
+        }
         updateView(
           zoomAt(
             viewRef.current,
@@ -1571,28 +1987,49 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         }
         const amount = event.shiftKey ? 10 : 1;
         if (event.key.startsWith('Arrow')) {
-          onCrop(
-            dragCrop(
-              crop,
-              { x: 0, y: 0 },
-              {
-                x:
-                  event.key === 'ArrowLeft'
-                    ? -amount
-                    : event.key === 'ArrowRight'
-                      ? amount
-                      : 0,
-                y:
-                  event.key === 'ArrowUp'
-                    ? -amount
-                    : event.key === 'ArrowDown'
-                      ? amount
-                      : 0,
-              },
-              'move',
-              doc
-            )
-          );
+          const delta = {
+            x:
+              event.key === 'ArrowLeft'
+                ? -amount
+                : event.key === 'ArrowRight'
+                  ? amount
+                  : 0,
+            y:
+              event.key === 'ArrowUp'
+                ? -amount
+                : event.key === 'ArrowDown'
+                  ? amount
+                  : 0,
+          };
+          const current = engine.getSnapshot().document,
+            source = engine.image;
+          if (current && source) {
+            if (cropOptions.interactionFocus === 'image')
+              previewCropImage(
+                current,
+                multiply(translate(delta.x, delta.y), current.imageMatrix),
+                crop,
+                cropOptions
+              );
+            else {
+              try {
+                onCrop(
+                  constrainCropRect(
+                    { ...crop, x: crop.x + delta.x, y: crop.y + delta.y },
+                    {
+                      width: source.width,
+                      height: source.height,
+                      matrix: current.imageMatrix,
+                    },
+                    cropOptions,
+                    { aspectRatio: cropRatio }
+                  )
+                );
+              } catch (error) {
+                if (!(error instanceof CropConstraintError)) throw error;
+              }
+            }
+          }
           event.preventDefault();
         }
         return;
@@ -1877,7 +2314,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             }
             if (event.key.startsWith('Arrow') && keyboardTransaction.current) {
               keyboardTransaction.current = false;
-              engine.end();
+              if (tool !== 'crop') engine.end();
             }
           }}
           onBlur={(event) => {
@@ -1885,7 +2322,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
               space.current = false;
               if (keyboardTransaction.current) {
                 keyboardTransaction.current = false;
-                engine.end();
+                if (tool !== 'crop') engine.end();
               }
             }
           }}
@@ -1924,6 +2361,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         >
           <div
             className="rie-artboard"
+            data-cropping={(tool === 'crop' && !compare) || undefined}
             style={{
               left: view.x,
               top: view.y,
@@ -1931,6 +2369,17 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
               height: doc.height * view.zoom,
             }}
           />
+          {tool === 'crop' && !compare ? (
+            <div
+              className="rie-crop-artboard"
+              style={{
+                left: view.x + crop.x * view.zoom,
+                top: view.y + crop.y * view.zoom,
+                width: crop.width * view.zoom,
+                height: crop.height * view.zoom,
+              }}
+            />
+          ) : null}
           <canvas ref={lower} className="lower-canvas" aria-hidden="true" />
           <canvas
             ref={upper}

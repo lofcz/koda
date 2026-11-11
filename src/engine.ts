@@ -8,6 +8,7 @@ import {
 } from './model';
 import { exportCanvas } from './render';
 import { parseExportOptions } from './exportOptions';
+import { parseCropOptions } from './crop';
 import {
   addJpegExif,
   addJpegExifToDataUrl,
@@ -141,6 +142,10 @@ export class CanvasEngine implements ImageEditorInstance {
   image: LoadedImage | null = null;
   constructor(private loader: ImageLoader = loadImage) {}
   getSnapshot = () => this.state;
+  /** UI drafts share history transaction ownership, including no-op undo/restore. */
+  get inTransaction() {
+    return this.history?.inTransaction ?? false;
+  }
   subscribe = (callback: () => void) => {
     this.listeners.add(callback);
     return () => {
@@ -284,6 +289,8 @@ export class CanvasEngine implements ImageEditorInstance {
       onLoadError: _onLoadError,
       ...presentation
     } = options;
+    if (presentation.crop !== undefined)
+      presentation.crop = parseCropOptions(presentation.crop);
     this.emit({ options: { ...this.state.options, ...presentation } });
     if (url !== undefined && url !== this.url)
       void this.reset(url).catch(() => {
@@ -302,8 +309,9 @@ export class CanvasEngine implements ImageEditorInstance {
   }
   getImage(options?: ImageExportOptions) {
     if (this.state.phase !== 'ready') return null;
-    const output = this.outputOptions(options);
+    this.outputOptions(options);
     this.flush();
+    const output = this.outputOptions(options);
     if (!this.history || !this.image) return null;
     const canvas = exportCanvas(
         this.history.current,
@@ -324,8 +332,9 @@ export class CanvasEngine implements ImageEditorInstance {
   async getBlob(options?: ImageExportOptions): Promise<Blob> {
     if (this.state.phase !== 'ready' || !this.history || !this.image)
       throw new Error('Editor is not ready');
-    const output = this.outputOptions(options);
+    this.outputOptions(options);
     this.flush();
+    const output = this.outputOptions(options);
     const canvas = exportCanvas(
       this.history.current,
       this.image.source,

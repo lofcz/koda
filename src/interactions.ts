@@ -79,26 +79,30 @@ export function dragCrop(
   start: Point,
   point: Point,
   mode: CropMode,
-  bounds: { width: number; height: number },
+  bounds: { width: number; height: number } | null,
   ratio: number | null = null
 ): Rect {
   if (mode === 'move')
     return {
       ...rect,
-      x: clamp(rect.x + point.x - start.x, 0, bounds.width - rect.width),
-      y: clamp(rect.y + point.y - start.y, 0, bounds.height - rect.height),
+      x: bounds
+        ? clamp(rect.x + point.x - start.x, 0, bounds.width - rect.width)
+        : rect.x + point.x - start.x,
+      y: bounds
+        ? clamp(rect.y + point.y - start.y, 0, bounds.height - rect.height)
+        : rect.y + point.y - start.y,
     };
   const p = {
-    x: clamp(point.x, 0, bounds.width),
-    y: clamp(point.y, 0, bounds.height),
+    x: bounds ? clamp(point.x, 0, bounds.width) : point.x,
+    y: bounds ? clamp(point.y, 0, bounds.height) : point.y,
   };
   const fresh = mode === 'new';
   const horizontal = fresh || mode.includes('e') || mode.includes('w');
   const vertical = fresh || mode.includes('n') || mode.includes('s');
   const anchor = fresh
     ? {
-        x: clamp(start.x, 0, bounds.width),
-        y: clamp(start.y, 0, bounds.height),
+        x: bounds ? clamp(start.x, 0, bounds.width) : start.x,
+        y: bounds ? clamp(start.y, 0, bounds.height) : start.y,
       }
     : {
         x: mode.includes('w')
@@ -117,16 +121,20 @@ export function dragCrop(
   const sy = fresh ? (p.y < anchor.y ? -1 : 1) : mode.includes('n') ? -1 : 1;
   let width = horizontal ? Math.max(1, (p.x - anchor.x) * sx) : rect.width;
   let height = vertical ? Math.max(1, (p.y - anchor.y) * sy) : rect.height;
-  const limitX = horizontal
-    ? sx < 0
-      ? anchor.x
-      : bounds.width - anchor.x
-    : 2 * Math.min(anchor.x, bounds.width - anchor.x);
-  const limitY = vertical
-    ? sy < 0
-      ? anchor.y
-      : bounds.height - anchor.y
-    : 2 * Math.min(anchor.y, bounds.height - anchor.y);
+  const limitX = !bounds
+    ? Infinity
+    : horizontal
+      ? sx < 0
+        ? anchor.x
+        : bounds.width - anchor.x
+      : 2 * Math.min(anchor.x, bounds.width - anchor.x);
+  const limitY = !bounds
+    ? Infinity
+    : vertical
+      ? sy < 0
+        ? anchor.y
+        : bounds.height - anchor.y
+      : 2 * Math.min(anchor.y, bounds.height - anchor.y);
   if (ratio && Number.isFinite(ratio) && ratio > 0) {
     if (!horizontal) width = height * ratio;
     else if (!vertical) height = width / ratio;

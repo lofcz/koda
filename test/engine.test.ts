@@ -200,6 +200,82 @@ it('export finalizes text transactions and cancellation keeps history intact', a
   engine.cancel();
   expect(engine.getSnapshot().document).toBe(doc);
 });
+
+it('the first export uses crop target settings committed by its finalizer while invalid requests preserve the draft', async () => {
+  const engine = await ready(),
+    doc = engine.getSnapshot().document!,
+    finalize = vi.fn(() => {
+      engine.commit(cropDocument(doc, { x: 10, y: 5, width: 40, height: 30 }));
+      engine.updateOptions({
+        export: {
+          width: 160,
+          height: 120,
+          fit: 'force',
+          type: 'image/jpeg',
+          quality: 0.7,
+        },
+      });
+    });
+  engine.beforeExport(finalize);
+  expect(() => engine.getImage({ width: 0 })).toThrow();
+  expect(finalize).not.toHaveBeenCalled();
+  expect(engine.getSnapshot().document).toBe(doc);
+  engine.getImage({ type: 'image/png' });
+  expect(finalize).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(exportCanvas).mock.lastCall?.[2]).toMatchObject({
+    width: 160,
+    height: 120,
+    fit: 'force',
+    type: 'image/png',
+    quality: 0.7,
+  });
+  engine.beforeExport(() =>
+    engine.updateOptions({ export: { width: 80, height: 60, fit: 'contain' } })
+  );
+  await engine.getBlob();
+  expect(vi.mocked(exportCanvas).mock.lastCall?.[2]).toMatchObject({
+    width: 80,
+    height: 60,
+    fit: 'contain',
+  });
+});
+
+it('publishes ended transaction ownership even when undo or restore leaves the document unchanged', async () => {
+  const engine = await ready(),
+    original = engine.getSnapshot().document!,
+    observed: boolean[] = [];
+  engine.subscribe(() => observed.push(engine.inTransaction));
+  engine.begin();
+  expect(engine.inTransaction).toBe(true);
+  engine.undo();
+  expect(engine.inTransaction).toBe(false);
+  expect(engine.getSnapshot().document).toBe(original);
+  expect(observed.at(-1)).toBe(false);
+  engine.begin();
+  expect(engine.inTransaction).toBe(true);
+  await engine.restoreDocument(original);
+  expect(engine.inTransaction).toBe(false);
+  expect(observed.at(-1)).toBe(false);
+  expect(engine.getSnapshot().canUndo).toBe(false);
+});
+
+it('rejects invalid crop option updates before changing presentation or pending edit ownership', async () => {
+  const engine = await ready(),
+    original = engine.getSnapshot().document!;
+  const crop = { aspectRatio: 2, minSize: { width: 20, height: 10 } };
+  engine.updateOptions({ crop });
+  engine.begin();
+  expect(() =>
+    engine.updateOptions({ theme: 'dark', crop: { aspectRatio: 0 } })
+  ).toThrow();
+  expect(engine.getSnapshot().options.theme).toBeUndefined();
+  expect(engine.getSnapshot().options.crop).toMatchObject(crop);
+  crop.minSize.width = 999;
+  expect(engine.getSnapshot().options.crop?.minSize?.width).toBe(20);
+  expect(engine.getSnapshot().document).toBe(original);
+  expect(engine.inTransaction).toBe(true);
+  engine.cancel();
+});
 it('successful reset discards the previous image crop before immediate export', async () => {
   const engine = new CanvasEngine(
     vi

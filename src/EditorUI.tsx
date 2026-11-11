@@ -10,7 +10,6 @@ import { CanvasEngine, EngineState } from './engine';
 import { CanvasSurface, PathState, SurfaceActions } from './CanvasSurface';
 import { alignLayers, distributeLayers, duplicateLayers } from './interactions';
 import {
-  cropDocument,
   DEFAULT_EFFECTS,
   DEFAULT_FRAME,
   duplicateLayer,
@@ -18,22 +17,32 @@ import {
   flipDocument,
   flipLayer,
   ImageDocument,
+  inverse,
   Layer,
+  Matrix,
   multiply,
   Rect,
   resizeDocument,
   rotateDocument,
+  rotation,
   rotateLayer,
   reorderLayer,
   scale,
   ShapeKind,
   TextStyle,
-  straightenDocument,
   translate,
   updateLayer,
 } from './model';
 import { filterPixels, fitTextLayer, textSize } from './render';
 import { resolveTextStyle, textContent } from './textModel';
+import {
+  applyCrop as applyCropDocument,
+  constrainCropRect,
+  constrainImageToCrop,
+  parseCropOptions,
+  transformImage,
+} from './crop';
+import type { CropOptions, CropPreset } from './crop';
 import {
   formatRichText,
   selectedTextStyle,
@@ -140,7 +149,8 @@ function NumberField({
             n <= max
           )
             onCommit(n);
-          else event.currentTarget.value = value === null ? '' : String(value);
+          event.currentTarget.value =
+            value === null ? '' : String(Math.round(value * 100) / 100);
           onEnd?.();
         }}
         onKeyDown={(event) => {
@@ -264,12 +274,14 @@ function ChoicePicker({
   choices,
   onChange,
   t,
+  testId,
 }: {
   label: string;
   value: string | null;
-  choices: readonly { value: string; label: string }[];
+  choices: readonly { value: string; label: string; group?: string }[];
   onChange(value: string): void;
   t(key: string): string;
+  testId?: string;
 }) {
   const [open, setOpen] = useState(false),
     [query, setQuery] = useState('');
@@ -278,7 +290,9 @@ function ChoicePicker({
     search = useRef<HTMLInputElement>(null),
     id = useId();
   const filtered = choices.filter((item) =>
-    item.label.toLocaleLowerCase().includes(query.toLocaleLowerCase())
+    `${item.group ?? ''} ${item.label}`
+      .toLocaleLowerCase()
+      .includes(query.toLocaleLowerCase())
   );
   useEffect(() => {
     if (!open) return;
@@ -318,6 +332,7 @@ function ChoicePicker({
       <button
         type="button"
         ref={trigger}
+        data-testid={testId}
         className="rie-picker-trigger"
         aria-labelledby={`${id}-label ${id}-value`}
         aria-haspopup="listbox"
@@ -345,21 +360,28 @@ function ChoicePicker({
             onChange={(event) => setQuery(event.target.value)}
           />
           <div id={`${id}-list`} role="listbox" aria-label={label}>
-            {filtered.map((item) => (
-              <button
-                type="button"
-                role="option"
-                aria-selected={item.value === value}
-                key={item.value}
-                onClick={() => {
-                  onChange(item.value);
-                  setOpen(false);
-                  trigger.current?.focus();
-                }}
-              >
-                {item.label}
-                {item.value === value ? <Icon name="check" /> : null}
-              </button>
+            {filtered.map((item, index) => (
+              <React.Fragment key={item.value}>
+                {item.group && item.group !== filtered[index - 1]?.group ? (
+                  <div className="rie-picker-group" role="presentation">
+                    {item.group}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={item.value === value}
+                  key={item.value}
+                  onClick={() => {
+                    onChange(item.value);
+                    setOpen(false);
+                    trigger.current?.focus();
+                  }}
+                >
+                  {item.label}
+                  {item.value === value ? <Icon name="check" /> : null}
+                </button>
+              </React.Fragment>
             ))}
             {!filtered.length ? (
               <p className="rie-help">{t('picker.empty')}</p>
@@ -446,7 +468,8 @@ export function EditorUI({
       handle: RichTextInputHandle;
     } | null>(null),
     uploadField = useRef<HTMLInputElement>(null),
-    straightening = useRef<ImageDocument | null>(null);
+    straightening = useRef<ImageDocument | null>(null),
+    straightenStartAngle = useRef(0);
   const [tool, setTool] = useState<EditorTool>('select'),
     [panel, setPanel] = useState(false),
     [locked, setLocked] = useState(true);
@@ -532,16 +555,133 @@ export function EditorUI({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const [crop, setCrop] = useState<Rect>({ x: 0, y: 0, width: 1, height: 1 }),
-    [ratio, setRatio] = useState<number | null>(null);
+  const [error, setError] = useState(''),
+    [saving, setSaving] = useState(false);
+  const [crop, updateCrop] = useState<Rect>({
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    }),
+    [ratio, updateRatio] = useState<number | null>(null);
+  const ratioRef = useRef(ratio);
+  const setRatio = useCallback((next: number | null) => {
+    ratioRef.current = next;
+    updateRatio(next);
+  }, []);
+  const cropRect = useRef(crop);
+  const cropSession = useRef<{
+    imageRevision: number;
+    output?: { width: number; height: number };
+  } | null>(null);
+  const [cropOverrides, setCropOverrides] = useState<Partial<CropOptions>>({});
+  const [cropPreset, setCropPreset] = useState('free');
+  const [cropOutput, setCropOutput] = useState<
+    { width: number; height: number } | undefined
+  >();
+  const cropOptions = parseCropOptions({
+    ...state.options.crop,
+    ...cropOverrides,
+  });
+  const setCrop = useCallback((next: Rect) => {
+    cropRect.current = next;
+    updateCrop(next);
+  }, []);
+  const cropConfigKey = JSON.stringify(state.options.crop);
+  useLayoutEffect(() => {
+    let previous = JSON.stringify(engine.getSnapshot().options.crop);
+    return engine.subscribe(() => {
+      const key = JSON.stringify(engine.getSnapshot().options.crop);
+      if (key === previous) return;
+      previous = key;
+      if (!cropSession.current) return;
+      surface.current?.finishCropGesture();
+      const current = engine.getSnapshot(),
+        image = engine.image;
+      if (!current.document || !image) return;
+      const options = parseCropOptions(current.options.crop);
+      try {
+        const nextRatio = options.aspectRatio ?? ratioRef.current;
+        const next = constrainCropRect(
+          cropRect.current,
+          {
+            width: image.width,
+            height: image.height,
+            matrix: current.document.imageMatrix,
+          },
+          options.interactionFocus === 'image'
+            ? { ...options, allowOutsideImage: true }
+            : options,
+          { aspectRatio: nextRatio }
+        );
+        if (
+          options.interactionFocus === 'image' &&
+          !options.allowOutsideImage
+        ) {
+          const covered = constrainImageToCrop(
+            current.document.imageMatrix,
+            image,
+            next
+          );
+          if (covered !== current.document.imageMatrix)
+            engine.preview(
+              transformImage(
+                current.document,
+                multiply(covered, inverse(current.document.imageMatrix))
+              )
+            );
+        }
+        setCropOverrides({});
+        setRatio(nextRatio);
+        setCrop(next);
+        if (
+          options.aspectRatio &&
+          cropSession.current.output &&
+          Math.abs(
+            cropSession.current.output.width /
+              cropSession.current.output.height -
+              options.aspectRatio
+          ) > 1e-9
+        ) {
+          cropSession.current.output = undefined;
+          setCropOutput(undefined);
+        }
+        setError('');
+      } catch {
+        setError(translator(current.options)('crop.constraints_error'));
+      }
+    });
+  }, [engine, setCrop, setRatio]);
+  useLayoutEffect(() => {
+    const invalidate = () => {
+      if (!cropSession.current) return;
+      cropSession.current = null;
+      straightening.current = null;
+      setAngle(0);
+      setTool('select');
+      setPanel(false);
+    };
+    const committed = engine.subscribeChanges(invalidate);
+    const source = engine.subscribe(() => {
+      if (
+        cropSession.current &&
+        (!engine.inTransaction ||
+          engine.getSnapshot().imageRevision !==
+            cropSession.current.imageRevision)
+      )
+        invalidate();
+    });
+    return () => {
+      committed();
+      source();
+    };
+  }, [engine]);
   const [brush, setBrush] = useState<{
     color: string;
     size: number;
     mode: 'brush' | 'highlighter' | 'eraser';
     opacity: number;
   }>({ color: '#e5484d', size: 8, mode: 'brush', opacity: 1 });
-  const [error, setError] = useState(''),
-    [saving, setSaving] = useState(false);
   const [textSession, setTextSession] = useState<{
     id: string;
     selection: TextSelection;
@@ -603,24 +743,6 @@ export function EditorUI({
     activeTextEditor.current = null;
     setTextSession(null);
   }, [engine]);
-  useLayoutEffect(
-    () =>
-      engine.beforeExport(
-        doc
-          ? () => {
-              activeTextEditor.current?.handle.flush();
-              surface.current?.flushText();
-              if (pathState.drawing) surface.current?.finishPath();
-              if (tool === 'crop' && doc) {
-                engine.commit(cropDocument(doc, crop));
-                setTool('select');
-                setPanel(false);
-              }
-            }
-          : null
-      ),
-    [engine, tool, doc, crop, pathState.drawing]
-  );
   const disabled = state.phase !== 'ready' || saving;
   useLayoutEffect(() => {
     if (tool === 'shapes' && (shape === 'path' || pathState.editing))
@@ -669,22 +791,141 @@ export function EditorUI({
     Object.assign(textMarks, {
       [key]: commonValue(inlineStyles.map((style) => style[key])),
     });
-  const fullCrop = () =>
-    doc
-      ? { x: 0, y: 0, width: doc.width, height: doc.height }
-      : { x: 0, y: 0, width: 1, height: 1 };
-  const applyCrop = () => {
-    if (!doc) return null;
-    const next = tool === 'crop' ? cropDocument(doc, crop) : doc;
+  const cropSource = (current: ImageDocument) => ({
+    width: engine.image?.width ?? current.width,
+    height: engine.image?.height ?? current.height,
+    matrix: current.imageMatrix,
+  });
+  const changeCrop = (
+    next: Rect,
+    axis?: 'width' | 'height',
+    nextRatio = ratio
+  ) => {
+    const current = engine.getSnapshot().document;
+    if (!current || !cropSession.current) return;
+    try {
+      setCrop(
+        constrainCropRect(next, cropSource(current), cropOptions, {
+          aspectRatio: nextRatio,
+          axis,
+        })
+      );
+      setError('');
+      return true;
+    } catch {
+      setError(t('crop.constraints_error'));
+      return false;
+    }
+  };
+  const applyCrop = (propagateError = false) => {
+    const snapshot = engine.getSnapshot(),
+      current = snapshot.document;
+    if (!current || !cropSession.current) return current;
+    surface.current?.finishCropGesture();
+    const session = cropSession.current;
+    const options = parseCropOptions({
+      ...snapshot.options.crop,
+      ...(JSON.stringify(snapshot.options.crop) === cropConfigKey
+        ? cropOverrides
+        : {}),
+    });
+    let next: ImageDocument;
+    try {
+      next = applyCropDocument(
+        current,
+        cropRect.current,
+        cropSource(current),
+        options,
+        { aspectRatio: ratioRef.current }
+      );
+    } catch (cause) {
+      setError(t('crop.constraints_error'));
+      if (propagateError) throw cause;
+      return null;
+    }
+    cropSession.current = null;
+    straightening.current = null;
+    if (
+      session.output &&
+      (!options.aspectRatio ||
+        Math.abs(
+          session.output.width / session.output.height - options.aspectRatio
+        ) < 1e-9)
+    )
+      engine.updateOptions({
+        export: {
+          ...engine.getSnapshot().options.export,
+          ...session.output,
+          fit: 'force',
+        },
+      });
     engine.commit(next);
+    setAngle(0);
+    setTool('select');
+    setPanel(false);
     return next;
   };
+  useLayoutEffect(() =>
+    engine.beforeExport(
+      doc
+        ? () => {
+            activeTextEditor.current?.handle.flush();
+            surface.current?.flushText();
+            if (pathState.drawing) surface.current?.finishPath();
+            if (cropSession.current) applyCrop(true);
+          }
+        : null
+    )
+  );
   const choose = (next: EditorTool) => {
     if (disabled) return;
     const current = tool === 'crop' ? applyCrop() : doc;
+    if (!current) return;
     if (next === 'crop' && current) {
-      setCrop({ x: 0, y: 0, width: current.width, height: current.height });
-      setRatio(null);
+      const options = parseCropOptions(state.options.crop);
+      const nextRatio = options.aspectRatio ?? null;
+      let nextCrop: Rect,
+        nextDocument = current;
+      try {
+        nextCrop = constrainCropRect(
+          { x: 0, y: 0, width: current.width, height: current.height },
+          cropSource(current),
+          options.interactionFocus === 'image'
+            ? { ...options, allowOutsideImage: true }
+            : options,
+          { aspectRatio: nextRatio }
+        );
+        if (
+          options.interactionFocus === 'image' &&
+          !options.allowOutsideImage
+        ) {
+          const covered = constrainImageToCrop(
+            current.imageMatrix,
+            cropSource(current),
+            nextCrop
+          );
+          if (covered !== current.imageMatrix)
+            nextDocument = transformImage(
+              current,
+              multiply(covered, inverse(current.imageMatrix))
+            );
+        }
+      } catch {
+        setError(t('crop.constraints_error'));
+        return;
+      }
+      surface.current?.finishText();
+      engine.begin();
+      cropSession.current = {
+        imageRevision: engine.getSnapshot().imageRevision,
+      };
+      if (nextDocument !== current) engine.preview(nextDocument);
+      setCropOverrides({});
+      setCropOutput(undefined);
+      setCrop(nextCrop);
+      setRatio(nextRatio);
+      setCropPreset(nextRatio ? 'custom' : 'free');
+      setAngle(0);
     }
     setTool(next);
     setPanel(next !== 'select');
@@ -692,7 +933,7 @@ export function EditorUI({
     setError('');
   };
   const closePanel = () => {
-    if (tool === 'crop') applyCrop();
+    if (tool === 'crop' && !applyCrop()) return;
     if (tool === 'select') engine.select(null);
     setTool('select');
     setPanel(false);
@@ -893,34 +1134,117 @@ export function EditorUI({
     }
   };
   const presetRatio = (value: number | null) => {
-    if (!doc) return;
-    setRatio(value);
-    if (!value) {
-      setCrop(fullCrop());
+    const current = engine.getSnapshot().document;
+    if (!current || cropOptions.aspectRatio) return;
+    const width = value
+        ? Math.min(current.width, current.height * value)
+        : current.width,
+      height = value ? width / value : current.height;
+    const changed = changeCrop(
+      {
+        x: (current.width - width) / 2,
+        y: (current.height - height) / 2,
+        width,
+        height,
+      },
+      undefined,
+      value
+    );
+    if (changed) setRatio(value);
+    return changed;
+  };
+  const selectCropPreset = (preset: CropPreset) => {
+    if (
+      !presetRatio(
+        preset.size
+          ? preset.size.width / preset.size.height
+          : (preset.aspectRatio ?? null)
+      )
+    )
       return;
-    }
-    const width = Math.min(doc.width, doc.height * value),
-      height = width / value;
-    setCrop({
-      x: (doc.width - width) / 2,
-      y: (doc.height - height) / 2,
-      width,
-      height,
-    });
+    setCropPreset(preset.id);
+    if (cropSession.current) cropSession.current.output = preset.size;
+    setCropOutput(preset.size);
+  };
+  const previewCropImage = (base: ImageDocument, delta: Matrix) => {
+    let next = transformImage(base, delta);
+    const covered = constrainImageToCrop(
+      next.imageMatrix,
+      cropSource(next),
+      cropRect.current,
+      cropOptions.allowOutsideImage
+    );
+    next = transformImage(next, multiply(covered, inverse(next.imageMatrix)));
+    engine.preview(next);
+  };
+  const centeredCropTransform = (matrix: Matrix): Matrix => {
+    const rect = cropRect.current,
+      x = rect.x + rect.width / 2,
+      y = rect.y + rect.height / 2;
+    return multiply(translate(x, y), multiply(matrix, translate(-x, -y)));
   };
   const rotate = (clockwise: boolean) => {
-    const current = applyCrop();
-    if (!current) return;
-    const next = rotateDocument(current, clockwise);
-    engine.commit(next);
-    setCrop({ x: 0, y: 0, width: next.width, height: next.height });
-    if (ratio) setRatio(1 / ratio);
+    const current = engine.getSnapshot().document;
+    if (!current || !cropSession.current) return;
+    if (cropOptions.interactionFocus === 'image') {
+      previewCropImage(
+        current,
+        centeredCropTransform(rotation(clockwise ? 90 : -90))
+      );
+    } else {
+      const next = rotateDocument(current, clockwise),
+        r = cropRect.current;
+      const nextRatio = cropOptions.aspectRatio ?? (ratio ? 1 / ratio : null);
+      let nextCrop: Rect;
+      try {
+        nextCrop = constrainCropRect(
+          {
+            x: clockwise ? current.height - r.y - r.height : r.y,
+            y: clockwise ? r.x : current.width - r.x - r.width,
+            width: r.height,
+            height: r.width,
+          },
+          cropSource(next),
+          cropOptions,
+          { aspectRatio: nextRatio }
+        );
+      } catch {
+        setError(t('crop.constraints_error'));
+        return;
+      }
+      engine.preview(next);
+      setRatio(nextRatio);
+      setCrop(nextCrop);
+      if (cropSession.current.output && !cropOptions.aspectRatio) {
+        cropSession.current.output = {
+          width: cropSession.current.output.height,
+          height: cropSession.current.output.width,
+        };
+        setCropOutput(cropSession.current.output);
+      }
+    }
+    straightening.current = null;
+    setAngle(0);
   };
   const flip = (horizontal: boolean) => {
-    const current = applyCrop();
-    if (!current) return;
-    engine.commit(flipDocument(current, horizontal));
-    setCrop({ x: 0, y: 0, width: current.width, height: current.height });
+    const current = engine.getSnapshot().document;
+    if (!current || !cropSession.current) return;
+    if (cropOptions.interactionFocus === 'image')
+      previewCropImage(
+        current,
+        centeredCropTransform(scale(horizontal ? -1 : 1, horizontal ? 1 : -1))
+      );
+    else {
+      engine.preview(flipDocument(current, horizontal));
+      const r = cropRect.current;
+      setCrop({
+        ...r,
+        x: horizontal ? current.width - r.x - r.width : r.x,
+        y: horizontal ? r.y : current.height - r.y - r.height,
+      });
+    }
+    straightening.current = null;
+    setAngle(0);
   };
   const reorder = (direction: number) => {
     if (!doc || !layer) return;
@@ -968,20 +1292,25 @@ export function EditorUI({
     engine.select(item.id);
   };
   const cancelCrop = () => {
+    if (cropSession.current) {
+      surface.current?.finishCropGesture();
+      cropSession.current = null;
+      engine.cancel();
+    }
+    straightening.current = null;
+    setAngle(0);
     setTool('select');
     setPanel(false);
   };
   const endStraighten = () => {
     if (!straightening.current) return;
-    engine.end();
     straightening.current = null;
-    setAngle(0);
   };
   const save = async () => {
     if (disabled) return;
-    if (tool === 'crop') applyCrop();
     setSaving(true);
     try {
+      if (tool === 'crop') applyCrop(true);
       const dataUrl = engine.getImage();
       if (!dataUrl) throw new Error('Editor is not ready');
       const blob = await engine.getBlob();
@@ -1455,148 +1784,425 @@ export function EditorUI({
     <p className="rie-help">{t('selection.hint')}</p>
   );
   let controls: React.ReactNode = null;
-  if (doc && tool === 'crop')
+  if (doc && tool === 'crop') {
+    const presets: readonly CropPreset[] = cropOptions.presets ?? [
+      { id: 'free', label: t('crop.aspect_free'), aspectRatio: null },
+      {
+        id: 'original',
+        label: t('crop.aspect_original'),
+        aspectRatio:
+          (engine.image?.width ?? doc.width) /
+          (engine.image?.height ?? doc.height),
+      },
+      { id: 'square', label: t('crop.aspect_square'), aspectRatio: 1 },
+      ...[
+        [4, 3],
+        [16, 9],
+        [3, 4],
+        [9, 16],
+        [3, 2],
+      ].map(([w, h]) => ({
+        id: `${w}:${h}`,
+        label: `${w}:${h}`,
+        aspectRatio: w / h,
+      })),
+    ];
+    const activeRatio = cropOptions.aspectRatio ?? ratio;
+    const output = cropOutput;
     controls = (
-      <>
-        <div className="rie-ratios" aria-label={t('crop.aspect_ratio')}>
-          {[
-            [null, 'crop.aspect_free'],
-            [doc.width / doc.height, 'crop.aspect_original'],
-            [1, 'crop.aspect_square'],
-            [4 / 3, '4:3'],
-            [16 / 9, '16:9'],
-            [3 / 4, '3:4'],
-            [9 / 16, '9:16'],
-            [3 / 2, '3:2'],
-          ].map(([value, label]) => (
+      <div className="rie-stack rie-crop-controls">
+        <div
+          className="rie-crop-mode"
+          role="group"
+          aria-label={t('crop.focus')}
+        >
+          {(['image', 'selection'] as const).map((focus) => (
             <button
               type="button"
-              key={String(label)}
-              aria-pressed={ratio === value}
-              onClick={() => presetRatio(value as number | null)}
+              key={focus}
+              aria-pressed={cropOptions.interactionFocus === focus}
+              data-testid={`native-crop-focus-${focus}`}
+              onClick={() => {
+                surface.current?.finishCropGesture();
+                setCropOverrides({ ...cropOverrides, interactionFocus: focus });
+              }}
             >
-              <span
-                aria-hidden="true"
-                className="rie-ratio-outline"
-                style={{ aspectRatio: value || 1.45 }}
-              />
-              {String(label).startsWith('crop.') ? t(String(label)) : label}
+              <Icon name={focus === 'image' ? 'image' : 'crop'} />
+              {t(`crop.focus_${focus}`)}
             </button>
           ))}
         </div>
-        <SliderField
-          label={t('crop.straighten')}
-          value={angle}
-          min={-45}
-          max={45}
-          step={0.5}
-          suffix="°"
-          testId="native-crop-straighten"
-          onStart={() => {
-            if (!straightening.current) {
-              straightening.current = applyCrop();
-              engine.begin();
+        {cropOptions.interactionFocus === 'image' && cropOptions.enableZoom ? (
+          <div
+            className="rie-crop-zoom"
+            role="group"
+            aria-label={t('crop.zoom')}
+          >
+            <span>{t('crop.zoom')}</span>
+            <button
+              type="button"
+              className="rie-icon-button"
+              aria-label={t('crop.zoom_out')}
+              title={t('crop.zoom_out')}
+              data-testid="native-crop-zoom-out"
+              onClick={() => surface.current?.cropZoom(0.9)}
+            >
+              <Icon name="zoom_out" />
+            </button>
+            <button
+              type="button"
+              className="rie-icon-button"
+              aria-label={t('crop.zoom_in')}
+              title={t('crop.zoom_in')}
+              data-testid="native-crop-zoom-in"
+              onClick={() => surface.current?.cropZoom(1.1)}
+            >
+              <Icon name="zoom_in" />
+            </button>
+            <button
+              type="button"
+              className="rie-icon-button"
+              aria-label={t('crop.center_image')}
+              title={t('crop.center_image')}
+              data-testid="native-crop-center"
+              onClick={() => surface.current?.cropRecenter()}
+            >
+              <Icon name="fit_to_screen" />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            data-testid="native-crop-center"
+            onClick={() =>
+              cropOptions.interactionFocus === 'image'
+                ? surface.current?.cropRecenter()
+                : surface.current?.fitCrop()
             }
-          }}
-          onChange={(value) => {
-            const base = straightening.current ?? doc;
-            if (!straightening.current) {
-              straightening.current = base;
-              engine.begin();
+          >
+            <Icon name="fit_to_screen" />
+            {t(
+              cropOptions.interactionFocus === 'image'
+                ? 'crop.center_image'
+                : 'crop.center_selection'
+            )}
+          </button>
+        )}
+        {cropOptions.aspectRatio ? (
+          <p className="rie-help" data-testid="native-crop-required-ratio">
+            {t('crop.fixed_ratio')}:{' '}
+            {Number(cropOptions.aspectRatio.toFixed(4))}
+          </p>
+        ) : cropOptions.presets ? (
+          <ChoicePicker
+            label={t('crop.preset')}
+            value={
+              presets.some((item) => item.id === cropPreset)
+                ? cropPreset
+                : 'custom'
             }
-            const next = straightenDocument(base, value);
-            engine.preview(next);
-            setAngle(value);
-            setCrop({ x: 0, y: 0, width: next.width, height: next.height });
-          }}
-          onEnd={endStraighten}
-        />
-        <div className="rie-grid">
-          <NumberField
-            label={t('crop.region_x')}
-            value={crop.x}
-            min={0}
-            max={doc.width - 1}
-            onCommit={(x) =>
-              setCrop({
-                ...crop,
-                x,
-                width: Math.min(crop.width, doc.width - x),
-              })
-            }
+            choices={[
+              { value: 'custom', label: t('crop.custom') },
+              ...presets.map((item) => ({
+                value: item.id,
+                label: item.label,
+                group: item.group,
+              })),
+            ]}
+            testId="native-crop-preset"
+            t={t}
+            onChange={(id) => {
+              const preset = presets.find((item) => item.id === id);
+              if (preset) selectCropPreset(preset);
+              else {
+                setRatio(null);
+                setCropPreset('custom');
+                if (cropSession.current) cropSession.current.output = undefined;
+                setCropOutput(undefined);
+              }
+            }}
           />
-          <NumberField
-            label={t('crop.region_y')}
-            value={crop.y}
-            min={0}
-            max={doc.height - 1}
-            onCommit={(y) =>
-              setCrop({
-                ...crop,
-                y,
-                height: Math.min(crop.height, doc.height - y),
-              })
-            }
-          />
+        ) : (
+          <div className="rie-ratios" aria-label={t('crop.aspect_ratio')}>
+            {presets.map((preset) => (
+              <button
+                type="button"
+                key={preset.id}
+                aria-pressed={cropPreset === preset.id}
+                onClick={() => selectCropPreset(preset)}
+              >
+                <span
+                  aria-hidden="true"
+                  className="rie-ratio-outline"
+                  style={{ aspectRatio: preset.aspectRatio || 1.45 }}
+                />
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="rie-crop-size">
           <NumberField
             label={t('resize.width')}
             value={crop.width}
-            max={doc.width - crop.x}
-            onCommit={(width) => {
-              const w = ratio
-                ? Math.min(width, (doc.height - crop.y) * ratio)
-                : width;
-              setCrop({
-                ...crop,
-                width: w,
-                height: ratio ? w / ratio : crop.height,
-              });
-            }}
+            min={1}
+            max={8192}
+            testId="native-crop-width"
+            onCommit={(width) =>
+              changeCrop({ ...cropRect.current, width }, 'width')
+            }
           />
           <NumberField
             label={t('resize.height')}
             value={crop.height}
-            max={doc.height - crop.y}
-            onCommit={(height) => {
-              const h = ratio
-                ? Math.min(height, (doc.width - crop.x) / ratio)
-                : height;
-              setCrop({
-                ...crop,
-                height: h,
-                width: ratio ? h * ratio : crop.width,
-              });
-            }}
+            min={1}
+            max={8192}
+            testId="native-crop-height"
+            onCommit={(height) =>
+              changeCrop({ ...cropRect.current, height }, 'height')
+            }
           />
+          {!cropOptions.aspectRatio ? (
+            <button
+              type="button"
+              className="rie-icon-button"
+              aria-label={t('crop.orientation')}
+              title={t('crop.orientation')}
+              data-testid="native-crop-orientation"
+              onClick={() => {
+                const rect = cropRect.current,
+                  nextRatio = activeRatio ? 1 / activeRatio : null;
+                if (
+                  !changeCrop(
+                    {
+                      x: rect.x + (rect.width - rect.height) / 2,
+                      y: rect.y + (rect.height - rect.width) / 2,
+                      width: rect.height,
+                      height: rect.width,
+                    },
+                    undefined,
+                    nextRatio
+                  )
+                )
+                  return;
+                setRatio(nextRatio);
+                setCropPreset('custom');
+                if (cropSession.current?.output) {
+                  cropSession.current.output = {
+                    width: cropSession.current.output.height,
+                    height: cropSession.current.output.width,
+                  };
+                  setCropOutput(cropSession.current.output);
+                }
+              }}
+            >
+              <Icon name="rotate_right" />
+            </button>
+          ) : null}
         </div>
-        <div className="rie-row" aria-label={t('crop.rotate_flip')}>
-          {iconButton('rotate_left', 'rotate.rotate_left', () => rotate(false))}
-          {iconButton('rotate_right', 'rotate.rotate_right', () =>
-            rotate(true)
+        {output ? (
+          <p className="rie-help" data-testid="native-crop-output-size">
+            {t('crop.output_size')
+              .replace('{width}', String(output.width))
+              .replace('{height}', String(output.height))}
+          </p>
+        ) : null}
+        {cropOptions.enableRotation ? (
+          <>
+            <SliderField
+              label={t('crop.straighten')}
+              value={angle}
+              min={-cropOptions.rotationRange}
+              max={cropOptions.rotationRange}
+              step={0.5}
+              suffix="°"
+              testId="native-crop-straighten"
+              onStart={() => {
+                if (!straightening.current) {
+                  straightening.current = engine.getSnapshot().document;
+                  straightenStartAngle.current = angle;
+                }
+              }}
+              onChange={(value) => {
+                const base =
+                  straightening.current ?? engine.getSnapshot().document;
+                if (!base) return;
+                if (!straightening.current) {
+                  straightening.current = base;
+                  straightenStartAngle.current = angle;
+                }
+                previewCropImage(
+                  base,
+                  centeredCropTransform(
+                    rotation(value - straightenStartAngle.current)
+                  )
+                );
+                setAngle(value);
+              }}
+              onEnd={endStraighten}
+            />
+            <div className="rie-row" aria-label={t('crop.rotate_flip')}>
+              <button
+                type="button"
+                className="rie-icon-button"
+                aria-label={t('rotate.rotate_left')}
+                title={t('rotate.rotate_left')}
+                onClick={() => rotate(false)}
+              >
+                <Icon name="rotate_left" />
+              </button>
+              <button
+                type="button"
+                className="rie-icon-button"
+                aria-label={t('rotate.rotate_right')}
+                title={t('rotate.rotate_right')}
+                onClick={() => rotate(true)}
+              >
+                <Icon name="rotate_right" />
+              </button>
+              <button
+                type="button"
+                className="rie-icon-button"
+                aria-label={t('rotate.flip_horizontal')}
+                title={t('rotate.flip_horizontal')}
+                onClick={() => flip(true)}
+              >
+                <Icon name="flip_horizontal" />
+              </button>
+              <button
+                type="button"
+                className="rie-icon-button"
+                aria-label={t('rotate.flip_vertical')}
+                title={t('rotate.flip_vertical')}
+                onClick={() => flip(false)}
+              >
+                <Icon name="flip_vertical" />
+              </button>
+            </div>
+          </>
+        ) : null}
+        {cropOptions.enableLimitToggle ? (
+          <label className="rie-check">
+            <input
+              type="checkbox"
+              data-testid="native-crop-limit"
+              checked={!cropOptions.allowOutsideImage}
+              onChange={(event) => {
+                surface.current?.finishCropGesture();
+                const allowOutsideImage = !event.target.checked;
+                const current = engine.getSnapshot().document;
+                if (current && !allowOutsideImage) {
+                  try {
+                    if (cropOptions.interactionFocus === 'image') {
+                      const covered = constrainImageToCrop(
+                        current.imageMatrix,
+                        cropSource(current),
+                        cropRect.current,
+                        false
+                      );
+                      engine.preview(
+                        transformImage(
+                          current,
+                          multiply(covered, inverse(current.imageMatrix))
+                        )
+                      );
+                    } else {
+                      const next = constrainCropRect(
+                        cropRect.current,
+                        cropSource(current),
+                        { ...cropOptions, allowOutsideImage },
+                        { aspectRatio: activeRatio }
+                      );
+                      setCrop(next);
+                    }
+                  } catch {
+                    setError(t('crop.constraints_error'));
+                    return;
+                  }
+                }
+                setCropOverrides({ ...cropOverrides, allowOutsideImage });
+              }}
+            />
+            {t('crop.limit')}
+          </label>
+        ) : null}
+        <details className="rie-crop-details">
+          <summary>{t('crop.details')}</summary>
+          <div className="rie-stack">
+            <div className="rie-grid">
+              <NumberField
+                label={t('crop.region_x')}
+                value={crop.x}
+                min={-8192}
+                max={8192}
+                testId="native-crop-x"
+                onCommit={(x) => changeCrop({ ...cropRect.current, x })}
+              />
+              <NumberField
+                label={t('crop.region_y')}
+                value={crop.y}
+                min={-8192}
+                max={8192}
+                testId="native-crop-y"
+                onCommit={(y) => changeCrop({ ...cropRect.current, y })}
+              />
+            </div>
+            <ChoicePicker
+              label={t('crop.guides')}
+              value={
+                typeof cropOptions.guides === 'string'
+                  ? cropOptions.guides
+                  : 'custom'
+              }
+              choices={[
+                ...['none', 'thirds', 'grid', 'diagonals'].map((value) => ({
+                  value,
+                  label: t(`crop.guide_${value}`),
+                })),
+                ...(typeof state.options.crop?.guides === 'object'
+                  ? [{ value: 'custom', label: t('crop.guide_custom') }]
+                  : []),
+              ]}
+              t={t}
+              testId="native-crop-guides"
+              onChange={(value) =>
+                setCropOverrides({
+                  ...cropOverrides,
+                  guides:
+                    value === 'custom'
+                      ? state.options.crop?.guides
+                      : (value as 'none' | 'thirds' | 'grid' | 'diagonals'),
+                })
+              }
+            />
+            <ChoicePicker
+              label={t('crop.handles')}
+              value={cropOptions.handleStyle}
+              choices={['circle', 'hook', 'invisible'].map((value) => ({
+                value,
+                label: t(`crop.handle_${value}`),
+              }))}
+              t={t}
+              testId="native-crop-handles"
+              onChange={(value) =>
+                setCropOverrides({
+                  ...cropOverrides,
+                  handleStyle: value as 'circle' | 'hook' | 'invisible',
+                })
+              }
+            />
+          </div>
+        </details>
+        <p className="rie-help">
+          {t(
+            cropOptions.interactionFocus === 'image'
+              ? 'crop.image_hint'
+              : 'crop.hint'
           )}
-          {iconButton('flip_horizontal', 'rotate.flip_horizontal', () =>
-            flip(true)
-          )}
-          {iconButton('flip_vertical', 'rotate.flip_vertical', () =>
-            flip(false)
-          )}
-        </div>
-        <div className="rie-row rie-actions-row">
-          <button type="button" onClick={cancelCrop}>
-            {t('crop.cancel')}
-          </button>
-          <button
-            type="button"
-            className="rie-primary"
-            data-testid="native-crop-apply"
-            onClick={closePanel}
-          >
-            <Icon name="check" />
-            {t('actions.apply')}
-          </button>
-        </div>
-      </>
+        </p>
+      </div>
     );
+  }
   if (doc && tool === 'resize')
     controls = (
       <div className="rie-stack" data-testid="native-resize-panel">
@@ -2704,12 +3310,40 @@ export function EditorUI({
           >
             <div className="rie-options-heading">
               <h2>{t(`tools.${tool}`)}</h2>
-              {iconButton(
-                'close',
-                'toolbar.close_tool_panel',
-                closePanel,
-                false,
-                'native-tool-options-close'
+              {tool === 'crop' ? (
+                <div className="rie-crop-heading-actions">
+                  <button
+                    type="button"
+                    className="rie-icon-button"
+                    aria-label={t('crop.cancel')}
+                    title={t('crop.cancel')}
+                    data-testid="native-crop-cancel"
+                    onClick={cancelCrop}
+                  >
+                    <Icon name="close" />
+                  </button>
+                  <button
+                    type="button"
+                    className="rie-primary"
+                    data-testid="native-crop-apply"
+                    onClick={closePanel}
+                  >
+                    <Icon name="check" />
+                    {t('actions.apply')}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="rie-icon-button"
+                  aria-label={t('toolbar.close_tool_panel')}
+                  title={t('toolbar.close_tool_panel')}
+                  onClick={closePanel}
+                  disabled={disabled}
+                  data-testid="native-tool-options-close"
+                >
+                  <Icon name="close" />
+                </button>
               )}
             </div>
             <div className="rie-options-content">{controls}</div>
@@ -2726,6 +3360,7 @@ export function EditorUI({
             brush={brush}
             crop={crop}
             cropRatio={ratio}
+            cropOptions={cropOptions}
             onCrop={setCrop}
             onText={editText}
             renderTextInput={renderTextInput}
@@ -2758,20 +3393,22 @@ export function EditorUI({
             <span className="rie-original-label">{t('toolbar.original')}</span>
           ) : (
             <span className="rie-tool-hint">
-              {pathState.editing
-                ? t('path.edit_hint')
-                : tool === 'shapes' && shape === 'path'
-                  ? t('path.draw_hint')
-                  : [
-                        'crop',
-                        'draw',
-                        'text',
-                        'shapes',
-                        'redact',
-                        'stickers',
-                      ].includes(tool)
-                    ? t(`${tool === 'text' ? 'text' : tool}.hint`)
-                    : ''}
+              {tool === 'crop' && cropOptions.interactionFocus === 'image'
+                ? t('crop.image_hint')
+                : pathState.editing
+                  ? t('path.edit_hint')
+                  : tool === 'shapes' && shape === 'path'
+                    ? t('path.draw_hint')
+                    : [
+                          'crop',
+                          'draw',
+                          'text',
+                          'shapes',
+                          'redact',
+                          'stickers',
+                        ].includes(tool)
+                      ? t(`${tool === 'text' ? 'text' : tool}.hint`)
+                      : ''}
             </span>
           )}
         </div>

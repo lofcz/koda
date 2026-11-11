@@ -2,7 +2,7 @@
 
 Package: `@lofcz/react-image-editor`. Repository: [lofcz/react-image-editor](https://github.com/lofcz/react-image-editor).
 
-Version 1.1 wrapped the hosted Unlayer engine. Version 2 replaces it with a locally authored Canvas2D document, renderer and controls. The package contains no hosted engine code, external runtime loader or third-party canvas engine. Original wrapper attribution remains in the MIT license. The current `2.0.0-rc.3` candidate is prepared for application testing and has not been published.
+Version 1.1 wrapped the hosted Unlayer engine. Version 2 replaces it with a locally authored Canvas2D document, renderer and controls. The package contains no hosted engine code, external runtime loader or third-party canvas engine. Original wrapper attribution remains in the MIT license. Stable version 2.0.0 was published through the trusted GitHub Actions workflow.
 
 The 1.1 fork merged these upstream pull requests with their original commits:
 
@@ -24,6 +24,12 @@ Windows: `./bootstrap-publish.ps1`. This is a publishing command, not a local bu
 
 For routine releases, manually dispatch **Release and Publish to npm** on `main`, selecting patch/minor/major. The workflow validates, runs real browser checks, bumps, publishes with provenance and OIDC, pushes the release commit/tag, then creates the GitHub release. Actions must be enabled and the workflow must have repository write permission. No npm secret is required. Pushing source changes does not publish a release.
 
-Selecting **patch** from `2.0.0-rc.3` produces stable `2.0.0`; this was checked against npm's semver implementation. Do not use the bootstrap command to prepare a local candidate. Use `pnpm build` followed by `npm pack --ignore-scripts` instead.
+Use normal stable versions for releases and install them from npm in consuming apps. Do not vendor package archives or publish release candidates. To release a verified feature update:
+
+```sh
+gh workflow run release.yml -R lofcz/react-image-editor --ref main -f release_type=minor
+```
+
+The bootstrap is already complete; routine releases do not require npm login or a new trust configuration.
 
 Reference: [npm trust](https://docs.npmjs.com/cli/v11/commands/npm-trust).

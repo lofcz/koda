@@ -6,9 +6,18 @@ import {
   LineEnd,
   Matrix,
   Point,
+  Rect,
+  multiply,
+  scale,
+  translate,
+  transformDocument,
+  MAX_DIMENSION,
+  MAX_PIXELS,
 } from './model';
 import type { ImageExportOptions } from './types';
 import { resolveExportSize } from './exportOptions';
+import { cropOutputSize } from './crop';
+import type { CropOptions } from './crop';
 import { layoutText } from './textLayout';
 import type { TextMeasure } from './textLayout';
 import { graphemes, textContent } from './textModel';
@@ -527,16 +536,19 @@ const filteredImages = new WeakMap<
   object,
   { key: string; canvas: HTMLCanvasElement }
 >();
-const compositions = new WeakMap<
-  object,
-  {
-    doc: ImageDocument;
-    assets: ImageAssets;
-    canvas: HTMLCanvasElement;
-    base?: HTMLCanvasElement;
-    mask?: HTMLCanvasElement;
-  }
->();
+type Composition = {
+  doc: ImageDocument;
+  assets: ImageAssets;
+  canvas: HTMLCanvasElement;
+  base?: HTMLCanvasElement;
+  mask?: HTMLCanvasElement;
+  decoration?: CompositionDecoration;
+};
+const compositions = new WeakMap<object, Composition>();
+const cropOverflows = new WeakMap<object, Composition>();
+const cropSelections = new WeakMap<object, Composition>();
+
+type CompositionDecoration = { document: ImageDocument; matrix: Matrix };
 
 function sourceDimensions(image: CanvasImageSource) {
   const source = image as unknown as {
@@ -729,20 +741,44 @@ function paintFrame(ctx: CanvasRenderingContext2D, doc: ImageDocument) {
 function compose(
   doc: ImageDocument,
   image: CanvasImageSource,
-  assets: ImageAssets
+  assets: ImageAssets,
+  decoration?: CompositionDecoration,
+  cache = compositions
 ) {
-  const cached = compositions.get(image);
-  if (cached?.doc === doc && cached.assets === assets) return cached.canvas;
+  const cached = cache.get(image);
+  if (
+    cached?.doc === doc &&
+    cached.assets === assets &&
+    cached.decoration === decoration
+  )
+    return cached.canvas;
   const canvas = cached?.canvas ?? surface(doc.width, doc.height).canvas;
-  canvas.width = doc.width;
-  canvas.height = doc.height;
+  if (canvas.width !== doc.width || canvas.height !== doc.height) {
+    canvas.width = doc.width;
+    canvas.height = doc.height;
+  }
   const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const frameDoc = decoration?.document ?? doc;
   ctx.save();
-  roundedRect(ctx, 0, 0, doc.width, doc.height, doc.cornerRadius ?? 0);
+  ctx.save();
+  if (decoration) apply(ctx, decoration.matrix);
+  roundedRect(
+    ctx,
+    0,
+    0,
+    frameDoc.width,
+    frameDoc.height,
+    frameDoc.cornerRadius ?? 0
+  );
+  ctx.restore();
   ctx.clip();
-  if (doc.background && doc.background !== 'transparent') {
-    ctx.fillStyle = doc.background;
-    ctx.fillRect(0, 0, doc.width, doc.height);
+  if (frameDoc.background && frameDoc.background !== 'transparent') {
+    ctx.save();
+    if (decoration) apply(ctx, decoration.matrix);
+    ctx.fillStyle = frameDoc.background;
+    ctx.fillRect(0, 0, frameDoc.width, frameDoc.height);
+    ctx.restore();
   }
   ctx.save();
   apply(ctx, doc.imageMatrix);
@@ -752,17 +788,24 @@ function compose(
     mask = cached?.mask;
   if (doc.layers.some((layer) => layer.erase && !layer.hidden)) {
     base ??= surface(doc.width, doc.height).canvas;
-    base.width = doc.width;
-    base.height = doc.height;
-    base.getContext('2d')!.drawImage(canvas, 0, 0);
+    if (base.width !== doc.width || base.height !== doc.height) {
+      base.width = doc.width;
+      base.height = doc.height;
+    }
+    const baseContext = base.getContext('2d')!;
+    baseContext.clearRect(0, 0, doc.width, doc.height);
+    baseContext.drawImage(canvas, 0, 0);
     mask ??= surface(doc.width, doc.height).canvas;
   }
   doc.layers.forEach((layer) => {
     renderLayer(ctx, layer, assets);
     if (layer.erase && !layer.hidden && base && mask) {
-      mask.width = doc.width;
-      mask.height = doc.height;
+      if (mask.width !== doc.width || mask.height !== doc.height) {
+        mask.width = doc.width;
+        mask.height = doc.height;
+      }
       const maskContext = mask.getContext('2d')!;
+      maskContext.clearRect(0, 0, doc.width, doc.height);
       renderLayer(maskContext, { ...layer, erase: false }, assets);
       maskContext.globalCompositeOperation = 'source-in';
       maskContext.drawImage(base, 0, 0);
@@ -774,10 +817,110 @@ function compose(
       ctx.restore();
     }
   });
-  paintFrame(ctx, doc);
+  ctx.save();
+  if (decoration) apply(ctx, decoration.matrix);
+  paintFrame(ctx, frameDoc);
   ctx.restore();
-  compositions.set(image, { doc, assets, canvas, base, mask });
+  ctx.restore();
+  cache.set(image, { doc, assets, canvas, base, mask, decoration });
   return canvas;
+}
+
+/** Show source pixels outside the crop without allocating a source-sized expanded viewport.
+ * The caller owns the view transform and crop mask. Crop-bound styling is painted only inside. */
+export function paintCropPreview(
+  ctx: CanvasRenderingContext2D,
+  doc: ImageDocument,
+  image: CanvasImageSource,
+  crop: Rect,
+  assets: ImageAssets = EMPTY_ASSETS,
+  options: CropOptions = {}
+) {
+  if (
+    !ctx.canvas.width ||
+    !ctx.canvas.height ||
+    crop.width <= 0 ||
+    crop.height <= 0
+  )
+    return;
+  // Ordinary source-space paint is identical on both sides of a crop boundary.
+  // Draw it directly at display resolution; only erasing, redaction and crop-
+  // bound decoration require an isolated composition buffer.
+  if (
+    doc.frame.style === 'none' &&
+    !doc.cornerRadius &&
+    (!doc.background || doc.background === 'transparent') &&
+    !doc.layers.some(
+      (layer) =>
+        (layer.kind === 'redaction' || layer.erase) &&
+        !layer.hidden &&
+        layer.opacity > 0
+    )
+  ) {
+    ctx.save();
+    apply(ctx, doc.imageMatrix);
+    ctx.drawImage(filteredSource(image, doc.effects), 0, 0);
+    ctx.restore();
+    for (const layer of doc.layers) renderLayer(ctx, layer, assets);
+    return;
+  }
+  const matrix = ctx.getTransform(),
+    view: Matrix = [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f];
+  const factor = Math.min(
+    1,
+    MAX_DIMENSION / ctx.canvas.width,
+    MAX_DIMENSION / ctx.canvas.height,
+    Math.sqrt(MAX_PIXELS / (ctx.canvas.width * ctx.canvas.height))
+  );
+  const previewWidth = Math.max(1, Math.floor(ctx.canvas.width * factor)),
+    previewHeight = Math.max(1, Math.floor(ctx.canvas.height * factor));
+  const stageView = multiply(
+    scale(previewWidth / ctx.canvas.width, previewHeight / ctx.canvas.height),
+    view
+  );
+  const overflow: ImageDocument = {
+    ...transformDocument(doc, stageView, previewWidth, previewHeight),
+    background: 'transparent',
+    frame: { ...doc.frame, style: 'none' },
+    cornerRadius: 0,
+  };
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(
+    compose(overflow, image, assets, undefined, cropOverflows),
+    0,
+    0,
+    ctx.canvas.width,
+    ctx.canvas.height
+  );
+  ctx.restore();
+  const size = cropOutputSize(crop, options);
+  const decoration = {
+    document: { ...doc, ...size },
+    matrix: multiply(
+      stageView,
+      multiply(
+        translate(crop.x, crop.y),
+        scale(crop.width / size.width, crop.height / size.height)
+      )
+    ),
+  };
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(crop.x, crop.y, crop.width, crop.height);
+  ctx.clip();
+  ctx.clearRect(crop.x, crop.y, crop.width, crop.height);
+  ctx.restore();
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(
+    compose(overflow, image, assets, decoration, cropSelections),
+    0,
+    0,
+    ctx.canvas.width,
+    ctx.canvas.height
+  );
+  ctx.restore();
 }
 
 /** The preview scales the same composition used by export, including redaction samples. */

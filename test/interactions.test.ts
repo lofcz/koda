@@ -310,6 +310,28 @@ describe('crop manipulation', () => {
       dragCrop(rect, { x: 150, y: 100 }, { x: 1000, y: -400 }, 'move', bounds)
     ).toEqual({ ...rect, x: 400, y: 0 });
   });
+  it('retains source-space coordinates outside the old viewport before affine source constraints', () => {
+    expect(
+      dragCrop(rect, { x: 150, y: 100 }, { x: -250, y: -100 }, 'move', null)
+    ).toEqual({ ...rect, x: -300, y: -120 });
+    expect(
+      dragCrop(rect, { x: 100, y: 80 }, { x: -100, y: -120 }, 'nw', null)
+    ).toEqual({ x: -100, y: -120, width: 400, height: 320 });
+  });
+  it('keeps the opposite anchor and ratio for unbounded edge and backwards creation', () => {
+    const resized = dragCrop(
+      rect,
+      { x: 300, y: 140 },
+      { x: 900, y: 500 },
+      'e',
+      null,
+      2
+    );
+    expect(resized).toEqual({ x: 100, y: -60, width: 800, height: 400 });
+    expect(
+      dragCrop(rect, { x: -20, y: -30 }, { x: -220, y: -130 }, 'new', null, 1)
+    ).toEqual({ x: -220, y: -230, width: 200, height: 200 });
+  });
 });
 
 describe('annotation precision', () => {

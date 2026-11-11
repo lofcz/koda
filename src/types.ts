@@ -2,6 +2,16 @@ import type { CSSProperties, ReactNode } from 'react';
 import type { ImageDocument } from './model';
 import type { ImageExportOptions } from './exportOptions';
 import type { RichTextRenderer } from './RichTextInput';
+import type { CropOptions } from './crop';
+export type {
+  CropOptions,
+  CropPreset,
+  CropGuides,
+  CropSource,
+  CropSize,
+  CropIntent,
+  ResolvedCropOptions,
+} from './crop';
 export type { ImageExportOptions } from './exportOptions';
 export type {
   ImageDocument,
@@ -60,6 +70,8 @@ export interface ImageEditorOptions {
   showActions?: boolean;
   /** Default encoding options used by Save, getImage and getBlob. */
   export?: ImageExportOptions;
+  /** Non-destructive crop behavior and shared gesture/input constraints. */
+  crop?: CropOptions;
   /** A loader must return origin-clean pixels; aborted loads may never replace the current draft. */
   imageLoader?: ImageEditorImageLoader;
   features?: {

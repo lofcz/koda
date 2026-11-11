@@ -3,6 +3,17 @@
 import { ImageEditor } from './ImageEditor';
 
 export * from './types';
+export {
+  parseCropOptions,
+  constrainCropRect,
+  constrainImageToCrop,
+  applyCrop,
+  transformImage,
+  sourceBounds,
+  sourceContainsRect,
+  cropOutputSize,
+  CropConstraintError,
+} from './crop';
 export { RichTextInput } from './RichTextInput';
 export type {
   RichTextInputProps,

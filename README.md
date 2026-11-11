@@ -2,18 +2,14 @@
 
 A fully local React image editor, maintained by ScioBot. The package owns the Canvas2D renderer, editable layers, history and controls. It has no runtime dependency other than React, loads no remote scripts or fonts, and never uploads images. Image URLs supplied by the host are the only network resources it reads.
 
-Version `2.0.0-rc.3` is a prepared release candidate. It replaces the hosted engine used in version 1. See [migration notes](#migrating-from-version-1) before upgrading. This candidate has not been published to npm.
+Version 2 replaces the hosted engine used in version 1. See [migration notes](#migrating-from-version-1) before upgrading.
 
 ## Install and use
 
-Requires React 18 or newer and a browser with Canvas2D and Pointer Events. Build a candidate from this checkout:
+Requires React 18 or newer and a browser with Canvas2D and Pointer Events. Install the stable npm package:
 
 ```sh
-pnpm install
-pnpm build
-npm pack --ignore-scripts
-# In the consuming app:
-npm install /path/to/lofcz-react-image-editor-2.0.0-rc.3.tgz
+npm install @lofcz/react-image-editor
 ```
 
 ```tsx
@@ -139,6 +135,37 @@ const options = {
 
 The layout responds to its own container width. At 760px and below, tools become a horizontal bottom rail with a bounded contextual panel above it. The component inherits the host font. Hosts can override `--rie-bg`, `--rie-panel`, `--rie-muted`, `--rie-line`, `--rie-fg`, `--rie-secondary`, `--rie-accent` and `--rie-tint` on `.image-editor-root`. The root includes `data-editor-engine="local-canvas"`; stable `native-*` test IDs cover tools and controls.
 
+### Crop configuration
+
+Selection mode moves the crop rectangle. Image mode moves and zooms the original image and its annotations beneath the crop, keeping the frame and background attached to the output. The crop stays editable until Apply, switching tools, or host export. Cancel restores the starting draft; applying the crop is one undo step.
+
+```tsx
+const options = {
+  crop: {
+    interactionFocus: 'image' as const,
+    enableLimitToggle: true,
+    minSize: { width: 64, height: 64 },
+    maxSize: { width: 4096, height: 4096 },
+    guides: 'thirds' as const,
+    handleStyle: 'hook' as const,
+    presets: [
+      { id: 'free', label: 'Free', group: 'Shape', aspectRatio: null },
+      { id: 'square', label: 'Square', group: 'Shape', aspectRatio: 1 },
+      {
+        id: 'header',
+        label: 'Header',
+        group: 'Output size',
+        size: { width: 1200, height: 600 },
+      },
+    ],
+  },
+};
+```
+
+The default interaction focus is `selection`. Set `aspectRatio` to require a host-defined ratio. Size presets also set export dimensions when applied. The crop normally stays within the transformed original image; `allowOutsideImage` permits transparent or filled margins, and `enableLimitToggle` lets users change that choice. Cropping retains the original pixels, so a later crop can recover previously excluded areas.
+
+Guides support `none`, `thirds`, `grid`, `diagonals`, or custom fractional `columns` and `rows`. Handle styles are `circle`, `hook` and `invisible`. `maskOpacity`, `showSize`, `enableZoom`, `enableRotation` and `rotationRange` configure the remaining controls. Guides and handles never appear in exports. Pure crop validation and geometry helpers are also exported from the server-safe `/document` entry.
+
 ## Migrating from version 1
 
 The fork retains the React component, ref methods, callbacks, layout hooks and translation namespace. The runtime is now owned by this repository, with no Unlayer global, project, account, CDN or license service.
@@ -162,5 +189,13 @@ pnpm build
 ```
 
 Unit tests exercise affine geometry, editable layers, bounded transactions, image loading races, failed replacement recovery, synchronous notifications, localization and SSR. Chromium checks use actual Canvas2D pixels and controls, including alpha, exact export dimensions, gestures, crop export through the host ref, text, effects, mobile layout and absence of hosted globals/requests. CI runs both suites. `CHROMIUM_PATH` can select an already installed browser for local verification.
+
+Release stable versions through the trusted GitHub Actions publisher:
+
+```sh
+gh workflow run release.yml -R lofcz/react-image-editor --ref main -f release_type=minor
+```
+
+Use `patch`, `minor` or `major` according to the change. The workflow verifies the package, publishes it to npm with provenance, and creates its version tag and GitHub release. Consuming apps install the published version from npm.
 
 Release setup and fork history are in [FORK.md](FORK.md). The MIT license credits Unlayer for the original React wrapper and ScioBot contributors for the local engine.

@@ -573,6 +573,10 @@ try {
         `/@fs${root}/test/text-pixels.ts`
       ),
       richTextChecks = verifyTextPixels();
+    const { verifyCropPixels } = await import(
+        `/@fs${root}/test/crop-pixels.ts`
+      ),
+      cropChecks = verifyCropPixels();
     const { verifyStrictStickerRestore } = await import(
         `/@fs${root}/test/strict-restore-fixture.tsx`
       ),
@@ -606,6 +610,7 @@ try {
       exifOrientationAndPrivacy: true,
       strictModeAsyncRestore: true,
       ...richTextChecks,
+      ...cropChecks,
     };
   }, root);
   assert.equal(result.previewExportMatch, true);

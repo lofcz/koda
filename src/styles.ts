@@ -40,7 +40,8 @@ export const styles = `
 .image-editor-root .rie-canvas{position:absolute;inset:0;overflow:hidden;touch-action:none;outline-offset:-3px;overscroll-behavior:contain}
 .image-editor-root .rie-canvas canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
 .image-editor-root .lower-canvas{pointer-events:none}
-.image-editor-root .rie-artboard{position:absolute;pointer-events:none;box-shadow:0 2px 12px #0002;background-color:#fff;background-image:linear-gradient(45deg,#e5e7eb 25%,transparent 25%),linear-gradient(-45deg,#e5e7eb 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#e5e7eb 75%),linear-gradient(-45deg,transparent 75%,#e5e7eb 75%);background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0}
+.image-editor-root .rie-artboard,.image-editor-root .rie-crop-artboard{position:absolute;pointer-events:none;box-shadow:0 2px 12px #0002;background-color:#fff;background-image:linear-gradient(45deg,#e5e7eb 25%,transparent 25%),linear-gradient(-45deg,#e5e7eb 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#e5e7eb 75%),linear-gradient(-45deg,transparent 75%,#e5e7eb 75%);background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0}
+.image-editor-root .rie-artboard[data-cropping="true"]{background:none;box-shadow:none}
 .image-editor-root .rie-fallback{position:absolute;inset:0;z-index:5;display:grid;place-items:center;background:var(--rie-bg);padding:16px;text-align:center;font-size:13px}
 .image-editor-root .rie-sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .image-editor-root .rie-body[data-dock="right"] .rie-nav{order:3;border-right:0;border-left:1px solid var(--rie-line)}
@@ -127,6 +128,22 @@ export const styles = `
 .image-editor-root .rie-presets button{display:flex;flex-direction:column;gap:6px;padding:3px 3px 7px;min-width:0;border:1px solid transparent;border-radius:9px;overflow:hidden;font-size:11px}
 .image-editor-root .rie-presets button[aria-pressed="true"]{border-color:var(--rie-accent)}
 .image-editor-root .rie-presets canvas{display:block;width:100%;height:auto;aspect-ratio:3/2;border-radius:6px;background:var(--rie-muted)}
+.image-editor-root .rie-crop-mode{display:flex;gap:3px;border:1px solid var(--rie-line);border-radius:9px;padding:3px;background:var(--rie-bg)}
+.image-editor-root .rie-crop-heading-actions{display:flex;align-items:center;gap:4px}
+.image-editor-root .rie-crop-heading-actions .rie-primary{min-height:28px;padding:4px 8px;font-size:12px}
+.image-editor-root .rie-crop-mode button{flex:1;min-width:0;min-height:34px;font-size:12px;gap:6px}
+.image-editor-root .rie-crop-zoom{display:flex;align-items:center;gap:4px;min-width:0}
+.image-editor-root .rie-crop-zoom>span{flex:1;font-size:12px;color:var(--rie-secondary)}
+.image-editor-root .rie-crop-zoom .rie-icon-button{width:32px;min-height:32px;height:32px}
+.image-editor-root .rie-crop-size{display:flex;gap:8px;align-items:flex-end;min-width:0}
+.image-editor-root .rie-crop-size>.rie-label{flex:1;min-width:0}
+.image-editor-root .rie-crop-size>.rie-icon-button{flex:none;height:36px;width:30px;min-height:36px;margin-bottom:1px}
+.image-editor-root .rie-crop-details{min-width:0;border-top:1px solid var(--rie-line);padding-top:8px}
+.image-editor-root .rie-crop-details>summary{cursor:pointer;font-size:12px;color:var(--rie-fg);padding:5px 0}
+.image-editor-root .rie-crop-details>.rie-stack{padding-top:10px}
+.image-editor-root .rie-check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--rie-fg);min-height:32px;cursor:pointer}
+.image-editor-root .rie-check input{width:16px;height:16px;flex:none;accent-color:var(--rie-accent)}
+.image-editor-root .rie-picker-group{font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.04em;color:var(--rie-secondary);padding:8px 9px 4px}
 .image-editor-root .rie-ratios{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
 .image-editor-root .rie-ratios button{min-width:0;min-height:62px;flex-direction:column;padding:7px 2px;gap:6px;font-size:10px;overflow-wrap:anywhere}
 .image-editor-root .rie-ratio-outline{display:block;height:19px;max-width:29px;border:1.5px solid currentColor;border-radius:2px}
