@@ -550,7 +550,7 @@ export function EditorUI({
         '--rie-options-max-height',
         `${Math.max(56, Math.min(220, entry.contentRect.height * 0.3))}px`
       );
-      element.dataset.short = String(entry.contentRect.height < 330);
+      element.dataset.short = String(entry.contentRect.height < 420);
     });
     observer.observe(element);
     return () => observer.disconnect();
