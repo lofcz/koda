@@ -1,6 +1,6 @@
 {
   "name": "@lofcz/react-image-editor",
-  "version": "2.0.0-rc.2",
+  "version": "2.0.0-rc.3",
   "description": "A fully local React image editor with an editable Canvas2D document, layers and history",
   "type": "commonjs",
   "main": "./dist/index.js",

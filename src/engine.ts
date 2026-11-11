@@ -126,6 +126,8 @@ export class CanvasEngine implements ImageEditorInstance {
   private changes = new Set<(change: ImageEditorChange) => void>();
   private imageKey = 0;
   private generation = 0;
+  /** Tracks document ownership separately from render and no-op lifecycle notifications. */
+  private documentRevision = 0;
   private controller: AbortController | null = null;
   private url = '';
   private loadedUrl = '';
@@ -381,7 +383,7 @@ export class CanvasEngine implements ImageEditorInstance {
     const doc = parseDocument(input),
       generation = this.generation,
       restoreGeneration = ++this.restoreGeneration,
-      revision = this.state.revision,
+      documentRevision = this.documentRevision,
       controller = new AbortController(),
       sources = [
         ...new Set(
@@ -407,7 +409,7 @@ export class CanvasEngine implements ImageEditorInstance {
       if (
         generation !== this.generation ||
         restoreGeneration !== this.restoreGeneration ||
-        revision !== this.state.revision ||
+        documentRevision !== this.documentRevision ||
         controller.signal.aborted ||
         this.state.phase !== 'ready'
       )
@@ -515,6 +517,7 @@ export class CanvasEngine implements ImageEditorInstance {
   }
   private publish(committed = false) {
     if (!this.history) return;
+    if (this.history.current !== this.state.document) this.documentRevision++;
     const selectedIds = this.state.selectedIds.filter((id) =>
         this.history!.current.layers.some(
           (layer) => layer.id === id && !layer.locked && !layer.hidden

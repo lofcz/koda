@@ -2,7 +2,7 @@
 
 A fully local React image editor, maintained by ScioBot. The package owns the Canvas2D renderer, editable layers, history and controls. It has no runtime dependency other than React, loads no remote scripts or fonts, and never uploads images. Image URLs supplied by the host are the only network resources it reads.
 
-Version `2.0.0-rc.2` is a prepared release candidate. It replaces the hosted engine used in version 1. See [migration notes](#migrating-from-version-1) before upgrading. This candidate has not been published to npm.
+Version `2.0.0-rc.3` is a prepared release candidate. It replaces the hosted engine used in version 1. See [migration notes](#migrating-from-version-1) before upgrading. This candidate has not been published to npm.
 
 ## Install and use
 
@@ -13,7 +13,7 @@ pnpm install
 pnpm build
 npm pack --ignore-scripts
 # In the consuming app:
-npm install /path/to/lofcz-react-image-editor-2.0.0-rc.2.tgz
+npm install /path/to/lofcz-react-image-editor-2.0.0-rc.3.tgz
 ```
 
 ```tsx

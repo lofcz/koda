@@ -45,6 +45,18 @@ try {
     })
   );
   await page.goto(`${base}/core-check.html`);
+  // This isolated page bypasses Vite's HTML transform; install the same refresh
+  // preamble before importing the real React wrapper for the StrictMode check.
+  await page.addScriptTag({
+    type: 'module',
+    content: `
+    import RefreshRuntime from '/@react-refresh';
+    RefreshRuntime.injectIntoGlobalHook(window);
+    window.$RefreshReg$ = () => {};
+    window.$RefreshSig$ = () => (type) => type;
+    window.__vite_plugin_react_preamble_installed__ = true;
+  `,
+  });
   const result = await page.evaluate(async (root) => {
     const model = await import(`/@fs${root}/src/model.ts`),
       render = await import(`/@fs${root}/src/render.ts`),
@@ -557,6 +569,19 @@ try {
       'Synchronous JPEG export preserves normalized EXIF too'
     );
     engine.destroy();
+    const { verifyStrictStickerRestore } = await import(
+        `/@fs${root}/test/strict-restore-fixture.tsx`
+      ),
+      strictRestore = await verifyStrictStickerRestore();
+    equal(
+      [strictRestore.width, strictRestore.height, strictRestore.layers],
+      [512, 512, 1],
+      'StrictMode onLoad restores asynchronously loaded sticker documents'
+    );
+    check(
+      strictRestore.notifications > 0,
+      'No-op lifecycle and export notifications occurred during restore'
+    );
     return {
       photoEffects: true,
       previewExportMatch: true,
@@ -575,6 +600,7 @@ try {
       textOutlineShadow: true,
       originalSourceOwnership: true,
       exifOrientationAndPrivacy: true,
+      strictModeAsyncRestore: true,
     };
   }, root);
   assert.equal(result.previewExportMatch, true);

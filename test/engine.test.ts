@@ -377,6 +377,84 @@ it('later document restoration wins even when an earlier sticker loader ignores 
   });
 });
 
+it('no-op cleanup, transaction finalization and export reads do not supersede a pending sticker restore', async () => {
+  const pending = deferred<LoadedImage>(),
+    loader = vi
+      .fn()
+      .mockResolvedValueOnce(image())
+      .mockReturnValueOnce(pending.promise),
+    engine = new CanvasEngine(loader);
+  await engine.reset('base');
+  const original = engine.getSnapshot().document!,
+    layer = {
+      ...pathLayer([]),
+      kind: 'image' as const,
+      imageSource: 'data:image/png;base64,AA==',
+    },
+    restored = { ...resizeDocument(original, 40, 24), layers: [layer] },
+    restore = engine.restoreDocument(restored),
+    change = vi.fn();
+  engine.subscribeChanges(change);
+  const revision = engine.getSnapshot().revision;
+  engine.cancel();
+  engine.end();
+  engine.begin();
+  engine.end();
+  engine.getDocument();
+  engine.getImage();
+  await engine.getBlob();
+  engine.updateOptions({ theme: 'dark' });
+  expect(engine.getSnapshot().document).toBe(original);
+  expect(engine.getSnapshot().revision).toBeGreaterThan(revision);
+  expect(change).not.toHaveBeenCalled();
+  pending.resolve(image(10, 10));
+  await restore;
+  expect(engine.getSnapshot().document).toMatchObject(restored);
+  expect(engine.assets.has(layer.imageSource)).toBe(true);
+  expect(change).toHaveBeenCalledTimes(1);
+  engine.undo();
+  expect(engine.getSnapshot().document).toBe(original);
+});
+
+it.each(['commit', 'preview', 'commit then undo'] as const)(
+  'an actual intervening %s supersedes a pending restore',
+  async (action) => {
+    const pending = deferred<LoadedImage>(),
+      loader = vi
+        .fn()
+        .mockResolvedValueOnce(image())
+        .mockReturnValueOnce(pending.promise),
+      engine = new CanvasEngine(loader);
+    await engine.reset('base');
+    const original = engine.getSnapshot().document!,
+      restore = engine
+        .restoreDocument({
+          ...original,
+          layers: [
+            {
+              ...pathLayer([]),
+              kind: 'image',
+              imageSource: 'data:image/png;base64,AA==',
+            },
+          ],
+        })
+        .catch((error) => error),
+      edited = resizeDocument(original, 30, 20);
+    if (action === 'preview') {
+      engine.begin();
+      engine.preview(edited);
+    } else {
+      engine.commit(edited);
+      if (action === 'commit then undo') engine.undo();
+    }
+    const owned = engine.getSnapshot().document;
+    pending.resolve(image(10, 10));
+    expect((await restore).name).toBe('AbortError');
+    expect(engine.getSnapshot().document).toBe(owned);
+    expect(engine.assets.size).toBe(0);
+  }
+);
+
 it('reverting uses the owned baseline without reloading and undo recovers the complete draft', async () => {
   const engine = await ready(),
     original = engine.getSnapshot().document!,
