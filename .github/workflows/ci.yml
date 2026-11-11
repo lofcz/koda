@@ -47,6 +47,7 @@ jobs:
   browser:
     name: Local canvas pixels and interactions
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v6
@@ -55,7 +56,9 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec playwright install --with-deps chromium
+      # Hosted runners include Chromium's shared libraries. Avoid an apt refresh
+      # for optional fonts: Ubuntu mirror outages must not block canvas checks.
+      - run: pnpm exec playwright install --only-shell chromium
       - run: pnpm run test:browser
 
   test:
