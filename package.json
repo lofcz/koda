@@ -1,6 +1,6 @@
 {
-  "name": "@unlayer/react-image-editor",
-  "version": "1.0.2",
+  "name": "@lofcz/react-image-editor",
+  "version": "1.1.0",
   "description": "Unlayer's Image Editor Component for React.js",
   "type": "commonjs",
   "main": "./dist/index.js",
@@ -29,7 +29,8 @@
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
-      "version": "11.20.0"
+      "version": "11.20.0",
+      "onFail": "ignore"
     }
   },
   "packageManager": "pnpm@11.20.0",
@@ -48,7 +49,8 @@
     "format": "prettier --write .",
     "prepare": "pnpm run build",
     "prepublishOnly": "pnpm run lint && pnpm run typecheck && pnpm test",
-    "release": "pnpm run build && pnpm publish"
+    "release": "pnpm run build && pnpm publish",
+    "bootstrap:publish": "node scripts/bootstrap-publish.mjs"
   },
   "peerDependencies": {
     "react": ">=18"
@@ -77,11 +79,11 @@
     "vitest": "4.1.10"
   },
   "author": "Unlayer",
-  "homepage": "https://github.com/unlayer/react-image-editor#readme",
+  "homepage": "https://github.com/lofcz/react-image-editor#readme",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/unlayer/react-image-editor.git"
+    "url": "git+https://github.com/lofcz/react-image-editor.git"
   },
   "keywords": [
     "react",
