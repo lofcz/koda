@@ -9,7 +9,7 @@ export default defineConfig({
     alias: {
       // Import the component straight from the parent src/ so the demo
       // doubles as a development harness.
-      '@unlayer/react-image-editor': path.resolve(__dirname, '../src/index.ts'),
+      '@lofcz/react-image-editor': path.resolve(__dirname, '../src/index.ts'),
     },
     // The aliased source must resolve to the demo's single React copy,
     // otherwise: "invalid hook call".

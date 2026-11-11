@@ -8,7 +8,7 @@
 ## Installation
 
 - Running `pnpm install` in the root directory installs everything you need for development, including the demo app in `demo/` (a pnpm workspace package).
-- npm, Yarn and Bun aren't supported. `npm install` and `npm run` stop with an `EBADDEVENGINES` error.
+- Use the pinned pnpm to install dependencies and keep the workspace lockfile current. npm is used by the release/bootstrap commands and by consumers installing the package.
 
 ### Dependency install scripts
 
@@ -23,6 +23,7 @@ pnpm doesn't run a dependency's install scripts (`preinstall`, `install`, `posti
 - `pnpm test` runs the tests once.
 - `pnpm test:coverage` runs the tests and produces a coverage report in `coverage/`.
 - `pnpm test:watch` runs the tests on every change.
+- `pnpm exec playwright install chromium`, then `pnpm test:browser`, checks actual Canvas2D rendering and controls with hosted editor requests blocked. Unit coverage targets document/history and image lifetimes; the browser suite covers native rendering and React interaction.
 
 ## Building
 

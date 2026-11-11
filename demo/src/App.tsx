@@ -3,8 +3,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import ImageEditor, {
   ImageEditorRef,
   ImageEditorSaveResult,
-} from '@unlayer/react-image-editor';
-import type { UnlayerLocale } from '@unlayer/types';
+  type ImageEditorLocale,
+} from '@lofcz/react-image-editor';
 
 import Sidebar, { TOOL_NAMES, ToolName } from './Sidebar';
 
@@ -31,7 +31,7 @@ export default function App() {
 
   const [image, setImage] = useState(SAMPLE_IMAGES[0]);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
-  const [locale, setLocale] = useState<UnlayerLocale>('en');
+  const [locale, setLocale] = useState<ImageEditorLocale>('en');
   const [dock, setDock] = useState<'left' | 'right'>('right');
   const [tools, setTools] =
     useState<Record<ToolName, boolean>>(allToolsEnabled);
@@ -104,12 +104,12 @@ export default function App() {
 
   const changeDock = (next: 'left' | 'right') => {
     setDock(next);
-    setStatus(`Dock "${next}" (remount)`);
+    setStatus(`Dock "${next}"`);
   };
 
   const toggleTool = (tool: ToolName) => {
     setTools((previous) => ({ ...previous, [tool]: !previous[tool] }));
-    setStatus(`Tool "${tool}" toggled (remount)`);
+    setStatus(`Tool "${tool}" toggled`);
   };
 
   return (

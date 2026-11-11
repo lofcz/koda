@@ -44,6 +44,20 @@ jobs:
       - run: pnpm --dir demo run typecheck
       - run: pnpm --dir demo run build
 
+  browser:
+    name: Local canvas pixels and interactions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm run test:browser
+
   test:
     name: Test (Node ${{ matrix.node }}, React ${{ matrix.react }})
     runs-on: ubuntu-latest

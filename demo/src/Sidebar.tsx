@@ -1,6 +1,6 @@
 import React, { useRef } from 'react';
 
-import type { UnlayerLocale } from '@unlayer/types';
+import type { ImageEditorLocale } from '@lofcz/react-image-editor';
 
 export const TOOL_NAMES = [
   'crop',
@@ -9,25 +9,23 @@ export const TOOL_NAMES = [
   'draw',
   'text',
   'shapes',
-  'stickers',
-  'frame',
+  'select',
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-const LOCALES: { value: UnlayerLocale; label: string }[] = [
+const LOCALES: { value: ImageEditorLocale; label: string }[] = [
   { value: 'en', label: 'English' },
-  { value: 'es', label: 'Español' },
-  { value: 'fr', label: 'Français' },
-  { value: 'de', label: 'Deutsch' },
-  { value: 'ja', label: '日本語' },
+  { value: 'cs', label: 'Čeština' },
+  { value: 'sk', label: 'Slovenčina' },
+  { value: 'pl', label: 'Polski' },
 ];
 
 interface SidebarProps {
   theme: 'light' | 'dark';
   onThemeChange(theme: 'light' | 'dark'): void;
-  locale: UnlayerLocale;
-  onLocaleChange(locale: UnlayerLocale): void;
+  locale: ImageEditorLocale;
+  onLocaleChange(locale: ImageEditorLocale): void;
   dock: 'left' | 'right';
   onDockChange(dock: 'left' | 'right'): void;
   tools: Record<ToolName, boolean>;
@@ -85,7 +83,7 @@ export default function Sidebar(props: SidebarProps) {
           <select
             value={props.locale}
             onChange={(event) =>
-              props.onLocaleChange(event.target.value as UnlayerLocale)
+              props.onLocaleChange(event.target.value as ImageEditorLocale)
             }
           >
             {LOCALES.map((locale) => (

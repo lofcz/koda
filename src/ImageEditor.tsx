@@ -4,302 +4,165 @@ import React, {
   useImperativeHandle,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react';
-
-import { loadScript, resetLoader } from './loadScript';
+import { CanvasEngine, isAbort } from './engine';
+import { EditorUI } from './EditorUI';
+import { translator } from './locale';
 import { stableKey } from './stableKey';
-import { ImageEditorInstance, ImageEditorProps, ImageEditorRef } from './types';
+import { styles } from './styles';
+import type { ImageEditorProps, ImageEditorRef } from './types';
 
 function ImageEditorInner(
   props: ImageEditorProps,
   ref: React.Ref<ImageEditorRef>
 ) {
-  const {
-    image,
-    options = {},
-    scriptUrl,
-    minHeight = 500,
-    style = {},
-    className,
-    wrapperStyle = {},
-    wrapperClassName,
-    ariaLabel = 'Image editor',
-  } = props;
-
-  const [editor, setEditor] = useState<ImageEditorInstance | null>(null);
-  const [isInitializing, setIsInitializing] = useState(true);
-  const [initializationError, setInitializationError] = useState<Error | null>(
-    null
+  const [engine] = useState(() => new CanvasEngine());
+  const state = useSyncExternalStore(
+    engine.subscribe,
+    engine.getSnapshot,
+    engine.getSnapshot
   );
-  const [retryAttempt, setRetryAttempt] = useState(0);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  const generatedId = useId();
-  const editorId = props.editorId || `image-editor-${generatedId}`;
-
-  useImperativeHandle(ref, () => ({ editor }), [editor]);
-
-  // Latest props, so async chain links and MountOptions callbacks always
-  // see current values without remounting the editor.
-  const latestPropsRef = useRef(props);
+  const latest = useRef(props),
+    loaded = useRef(false),
+    generatedId = useId();
   useEffect(() => {
-    latestPropsRef.current = props;
+    latest.current = props;
   });
-
-  // All mount/destroy/reset operations run through this serialized chain:
-  // a new mount can never start before the previous destroy finishes (the
-  // editor throws on an occupied container), and image resets can never
-  // overlap. Every link ends in .catch so a rejection never poisons it.
-  const chainRef = useRef<Promise<void>>(Promise.resolve());
-  // The committed live instance; lets queued chain links detect that the
-  // instance they were enqueued for has been replaced or unmounted.
-  const editorRef = useRef<ImageEditorInstance | null>(null);
-  // The image the live instance is currently showing.
-  const appliedImageRef = useRef<string | null>(null);
-  // The updateOptions-tier values the live instance last received.
-  const appliedUpdatableRef = useRef<string | null>(null);
-
-  const fail = (error: unknown) => {
-    const err = error instanceof Error ? error : new Error(String(error));
-    const { onError } = latestPropsRef.current;
-    if (onError) {
-      // A throwing onError must never escape: fail() runs as the terminal
-      // .catch of the serialized chain, so a throw here would reject
-      // chainRef and poison every subsequent link (see the invariant above).
-      try {
-        onError(err);
-      } catch (callbackError) {
-        console.error(
-          '[react-image-editor] onError callback threw',
-          callbackError
-        );
-      }
-    } else {
-      console.error('[react-image-editor]', err);
-    }
-  };
-
-  const retry = () => {
-    setInitializationError(null);
-    setIsInitializing(true);
-    setRetryAttempt((attempt) => attempt + 1);
-  };
-
-  // theme/locale/translations apply via updateOptions; everything else in
-  // options requires a remount.
-  const { theme, locale, translations, ...remountOptions } = options;
-  // stableKey, not JSON.stringify: the latter is key-order sensitive, so a
-  // deeply equal options object written with its keys in a different order
-  // would remount the editor and discard the user's unsaved work.
-  //
-  // Deliberately recomputed every render, NOT memoised on the options
-  // identity. Callers are free to mutate one long-lived options object in
-  // place, and a memo keyed on that object would never see it change,
-  // leaving projectId/theme/feature settings silently stale. Serializing a
-  // small options object is far cheaper than the remount a missed change
-  // costs, and it is what the released JSON.stringify did.
-  const remountKey = stableKey(remountOptions);
-  const updatableKey = stableKey([theme, locale, translations]);
-
+  useImperativeHandle(
+    ref,
+    () => ({
+      editor:
+        state.phase === 'idle' || state.phase === 'destroyed' ? null : engine,
+    }),
+    [engine, state.phase]
+  );
   useEffect(() => {
-    let cancelled = false;
-    let instance: ImageEditorInstance | null = null;
-
-    chainRef.current = chainRef.current
-      .then(async () => {
-        if (cancelled) return;
-        await loadScript(scriptUrl);
-        if (cancelled) return;
-
-        const embed = window.ImageEditor;
-        const container = containerRef.current;
-        if (!embed) {
-          throw new Error(
-            'The embed script loaded but window.ImageEditor is unavailable.'
-          );
-        }
-        // Defensive: React only detaches the ref on unmount, which the
-        // cancelled check above already caught.
-        /* v8 ignore next */
-        if (!container) return;
-
-        // Read at call time, not effect time: the image prop may have
-        // moved on while a previous chain link was running.
-        const current = latestPropsRef.current;
-        const mountImage = current.image;
-        const mountOptions = current.options || {};
-
-        const created = await embed.createEditor({
-          ...mountOptions,
-          container,
-          image: mountImage,
-          onSave: (result) => latestPropsRef.current.onSave?.(result),
-          onCancel: () => latestPropsRef.current.onCancel?.(),
-          onLoadError: () => latestPropsRef.current.onLoadError?.(),
-        });
-
-        if (cancelled) {
-          created.destroy();
-          return;
-        }
-
-        instance = created;
-        editorRef.current = created;
-        appliedImageRef.current = mountImage;
-        appliedUpdatableRef.current = stableKey([
-          mountOptions.theme,
-          mountOptions.locale,
-          mountOptions.translations,
-        ]);
-        setEditor(created);
-        setIsInitializing(false);
-        // The editor mounted successfully, so a throw from the consumer's
-        // callback must not reach the terminal .catch below, where it would
-        // surface as a wrapper failure and could hard-reset the loader.
+    engine.activate();
+    return () => engine.destroy();
+  }, [engine]);
+  const optionsKey = stableKey(props.options ?? {});
+  useEffect(() => {
+    engine.updateOptions(latest.current.options ?? {});
+  }, [engine, optionsKey]);
+  useEffect(
+    () =>
+      engine.subscribeChanges((change) => {
         try {
-          latestPropsRef.current.onLoad?.(created);
-        } catch (callbackError) {
-          console.error(
-            '[react-image-editor] onLoad callback threw',
-            callbackError
-          );
+          latest.current.onChange?.(change);
+        } catch (error) {
+          console.error('[react-image-editor] onChange callback threw', error);
         }
-      })
-      .catch((error) => {
-        // If the versioned bundle never evaluated, drop the loader state
-        // we own so the next mount starts from a fresh embed.js. This is
-        // not what makes recovery possible — embed.js nulls its own cached
-        // promise on failure — so on a host-loaded page resetLoader leaves
-        // the tag and global in place and only our cache is cleared. When
-        // the impl global exists the failure was a mount error, not a
-        // bundle-load one; keep the loader.
-        if (!window.__ImageEditorImpl__) {
-          resetLoader(scriptUrl);
-        }
-        if (!cancelled) {
-          const err = error instanceof Error ? error : new Error(String(error));
-          setInitializationError(err);
-          setIsInitializing(false);
-          fail(err);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      editorRef.current = null;
-      setEditor(null);
-      setIsInitializing(true);
-      setInitializationError(null);
-      chainRef.current = chainRef.current
-        .then(() => {
-          instance?.destroy();
-          instance = null;
-        })
-        .catch(fail);
-    };
-  }, [scriptUrl, remountKey, retryAttempt]);
-
-  // Image changes apply through the chain as serialized resets: the
-  // underlying reset is deeply async, so un-serialized resets could finish
-  // out of order. Each link reads the latest image when it runs, which
-  // collapses rapid changes to the final value.
+      }),
+    [engine]
+  );
   useEffect(() => {
-    if (!editor) return;
-    if (appliedImageRef.current === image) return;
-
-    const instance = editor;
-    chainRef.current = chainRef.current
-      .then(async () => {
-        if (editorRef.current !== instance) return;
-        const target = latestPropsRef.current.image;
-        if (target === appliedImageRef.current) return;
-        await instance.reset(target);
-        appliedImageRef.current = target;
-      })
-      .catch(fail);
-  }, [editor, image]);
-
+    void engine.reset(props.image).catch((error) => {
+      if (!isAbort(error)) {
+        /* Engine state drives the error UI and callbacks. */
+      }
+    });
+  }, [engine, props.image]);
   useEffect(() => {
-    if (!editor) return;
-    // Skip instances already queued for destroy by a remount in the same
-    // commit — the replacement mount re-records the applied values itself.
-    if (editorRef.current !== editor) return;
-    if (appliedUpdatableRef.current === updatableKey) return;
-    appliedUpdatableRef.current = updatableKey;
-    try {
-      editor.updateOptions({ theme, locale, translations });
-    } catch (error) {
-      fail(error);
+    if (state.phase === 'ready' && !loaded.current) {
+      loaded.current = true;
+      try {
+        latest.current.onLoad?.(engine);
+      } catch (error) {
+        console.error('[react-image-editor] onLoad callback threw', error);
+      }
     }
-    // updatableKey is a stable digest of theme/locale/translations, so
-    // listing them as well would re-run this on every unrelated identity
-    // change of `translations` without changing what gets applied.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor, updatableKey]);
-
-  // The editor's content is enormously wide: the sticker and shape panels
-  // lay hundreds of tiles out in rows that never wrap, well over 10,000px of
-  // min-content width. A flex item refuses to shrink below its content
-  // unless its min-width is 0, so without the two minWidth defaults below the
-  // editor stretches whatever contains it — on a phone the page grows a
-  // horizontal scrollbar and the tool rail is pushed out of view — instead of
-  // scrolling inside the panel. With them, any container constrains the
-  // editor and responsive tweaks are a breakpoint away.
-  const fallback = initializationError
+  }, [engine, state.phase]);
+  useEffect(() => {
+    if (!state.error) return;
+    try {
+      latest.current.onLoadError?.();
+      latest.current.onError?.(state.error);
+    } catch (error) {
+      console.error('[react-image-editor] error callback threw', error);
+    }
+  }, [state.error]);
+  const t = translator(state.options),
+    retry = () => {
+      void engine.reset(props.image).catch(() => {
+        /* Error state remains available for another retry. */
+      });
+    };
+  const failed = state.phase === 'error',
+    loading = state.phase === 'idle' || state.phase === 'loading';
+  const fallback = failed
     ? typeof props.errorFallback === 'function'
-      ? props.errorFallback(initializationError, retry)
+      ? props.errorFallback(state.error!, retry)
       : (props.errorFallback ?? (
           <div role="alert">
-            <p>Unable to load the image editor.</p>
+            <p>{t('status.load_failed')}</p>
             <button type="button" onClick={retry}>
-              Try again
+              {t('status.retry')}
             </button>
           </div>
         ))
-    : isInitializing
+    : loading
       ? (props.loadingFallback ?? (
-          <div role="status">Loading image editor…</div>
+          <span role="status">{t('status.loading_image')}</span>
         ))
       : null;
-
   return (
     <div
-      className={wrapperClassName}
+      className={props.wrapperClassName}
       style={{
         flex: 1,
         display: 'flex',
         minWidth: 0,
-        minHeight: minHeight,
+        minHeight: props.minHeight ?? 500,
         position: 'relative',
-        ...wrapperStyle,
+        ...props.wrapperStyle,
       }}
     >
       <div
-        id={editorId}
-        ref={containerRef}
-        className={className}
-        // The embed renders an unlabelled generic div inside, so without a
-        // role and a name the whole editing surface is anonymous to
-        // assistive tech.
+        id={props.editorId ?? `image-editor-${generatedId}`}
+        className={props.className}
         role="region"
-        aria-label={ariaLabel}
-        // flex and minWidth first: defaults the consumer's style can override.
-        style={{ flex: 1, minWidth: 0, ...style }}
-      />
-      {fallback && (
+        aria-label={props.ariaLabel ?? t('title')}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          minHeight: 0,
+          display: 'flex',
+          ...props.style,
+        }}
+      >
         <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            display: 'grid',
-            placeItems: 'center',
-          }}
+          className="image-editor-root"
+          data-editor-engine="local-canvas"
+          data-scheme={state.options.theme ?? 'light'}
         >
-          {fallback}
+          <style>{styles}</style>
+          {state.phase !== 'destroyed' ? (
+            <EditorUI
+              key={state.imageRevision}
+              engine={engine}
+              state={state}
+              onSave={props.onSave}
+              onCancel={props.onCancel}
+              onError={props.onError}
+            />
+          ) : null}
+          {state.error && state.phase === 'ready' ? (
+            <p role="alert" className="rie-error">
+              {t('status.load_failed')}
+            </p>
+          ) : null}
+          {fallback ? (
+            <div className="rie-fallback" aria-busy={loading}>
+              {fallback}
+            </div>
+          ) : null}
         </div>
-      )}
+      </div>
     </div>
   );
 }
-
-export const ImageEditor = React.forwardRef(ImageEditorInner);
+export const ImageEditor = React.forwardRef<ImageEditorRef, ImageEditorProps>(
+  ImageEditorInner
+);
+ImageEditor.displayName = 'ImageEditor';

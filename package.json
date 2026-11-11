@@ -1,7 +1,7 @@
 {
   "name": "@lofcz/react-image-editor",
-  "version": "1.1.0",
-  "description": "Unlayer's Image Editor Component for React.js",
+  "version": "2.0.0-rc.0",
+  "description": "A fully local React image editor with an editable Canvas2D document, layers and history",
   "type": "commonjs",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -44,6 +44,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:browser": "node test/browser.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
@@ -54,9 +55,6 @@
   },
   "peerDependencies": {
     "react": ">=18"
-  },
-  "dependencies": {
-    "@unlayer/types": "1.477.0"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
@@ -71,6 +69,7 @@
     "globals": "17.12.0",
     "jsdom": "29.1.1",
     "prettier": "3.9.4",
+    "playwright": "1.65.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "tsup": "8.5.1",
@@ -78,7 +77,10 @@
     "typescript-eslint": "8.69.0",
     "vitest": "4.1.10"
   },
-  "author": "Unlayer",
+  "author": "lofcz",
+  "contributors": [
+    "Unlayer (original React wrapper)"
+  ],
   "homepage": "https://github.com/lofcz/react-image-editor#readme",
   "license": "MIT",
   "repository": {
@@ -92,6 +94,7 @@
     "image-editor",
     "photo-editor",
     "image-editing",
-    "unlayer"
+    "canvas",
+    "offline"
   ]
 }

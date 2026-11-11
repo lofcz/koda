@@ -12,7 +12,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "paths": {
-      "@unlayer/react-image-editor": ["../src/index.ts"]
+      "@lofcz/react-image-editor": ["../src/index.ts"]
     }
   }
 }
