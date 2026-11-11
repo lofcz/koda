@@ -400,6 +400,13 @@ try {
   const touchBase = await doc(),
     touchChanges = await changes();
   const cdp = await page.context().newCDPSession(page);
+  // Chromium aligns touch pointermove with animation frames, so a CDP touch
+  // can resolve before its pointer event is handled. Wait a bounded number of
+  // frames for the expected state; the assertion that follows still decides.
+  const settle = async (check) => {
+    for (let i = 0; i < 60 && !(await check()); i++)
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+  };
   const touch = (type, points) =>
     cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points });
   const p = { ...(await world(230, 190)), id: 1 },
@@ -412,14 +419,23 @@ try {
     { ...p2, x: p2.x - 18 },
     { ...q, x: q.x + 18 },
   ]);
+  await settle(
+    async () => (await doc()).imageMatrix[0] > touchBase.imageMatrix[0]
+  );
   const pinched = await doc();
   assert(pinched.imageMatrix[0] > touchBase.imageMatrix[0]);
   // CDP touchEnd releases the listed points; the second finger stays down and
   // must continue as a one-finger image drag.
   await touch('touchEnd', [{ ...p2, x: p2.x - 18 }]);
   await touch('touchMove', [{ ...q, x: q.x + 34 }]);
+  await settle(async () =>
+    (await doc()).imageMatrix.some((v, i) => v !== pinched.imageMatrix[i])
+  );
   assert.notDeepEqual((await doc()).imageMatrix, pinched.imageMatrix);
   await touch('touchCancel', []);
+  await settle(
+    async () => JSON.stringify(await doc()) === JSON.stringify(touchBase)
+  );
   assert.deepEqual(await doc(), touchBase);
   assert.equal(await changes(), touchChanges);
   await cdp.detach();

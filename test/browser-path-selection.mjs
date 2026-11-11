@@ -360,6 +360,13 @@ try {
   await reset();
   await choosePath();
   const cdp = await page.context().newCDPSession(page);
+  // Chromium aligns touch pointermove with animation frames, so a CDP touch
+  // can resolve before its pointer event is handled. Wait a bounded number of
+  // frames for the expected state; the assertion that follows still decides.
+  const settle = async (check) => {
+    for (let i = 0; i < 60 && !(await check()); i++)
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+  };
   const touch = (type, points) =>
     cdp.send('Input.dispatchTouchEvent', {
       type,
@@ -380,8 +387,12 @@ try {
     vertex = point(touchPolygon, touchPolygon.points[0]);
   await touch('touchStart', [await world(vertex.x, vertex.y)]);
   await touch('touchMove', [await world(vertex.x - 30, vertex.y + 35)]);
+  const unchanged = async () =>
+    JSON.stringify((await doc()).layers[0]) === JSON.stringify(touchPolygon);
+  await settle(async () => !(await unchanged()));
   assert.notDeepEqual((await doc()).layers[0], touchPolygon);
   await touch('touchCancel', []);
+  await settle(unchanged);
   assert.deepEqual((await doc()).layers[0], touchPolygon);
   assert.equal(await historyCount(), beforeTouch);
   await capture('path-mobile-dark.png');
