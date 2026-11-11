@@ -569,6 +569,10 @@ try {
       'Synchronous JPEG export preserves normalized EXIF too'
     );
     engine.destroy();
+    const { verifyTextPixels } = await import(
+        `/@fs${root}/test/text-pixels.ts`
+      ),
+      richTextChecks = verifyTextPixels();
     const { verifyStrictStickerRestore } = await import(
         `/@fs${root}/test/strict-restore-fixture.tsx`
       ),
@@ -601,6 +605,7 @@ try {
       originalSourceOwnership: true,
       exifOrientationAndPrivacy: true,
       strictModeAsyncRestore: true,
+      ...richTextChecks,
     };
   }, root);
   assert.equal(result.previewExportMatch, true);

@@ -19,4 +19,20 @@ export type {
   Rect,
   LineEnd,
   ShapeKind,
+  TextRun,
+  TextStyle,
+  ResolvedTextStyle,
 } from './model';
+export {
+  normalizeTextRuns,
+  textContent,
+  resolveTextStyle,
+  graphemes,
+} from './textModel';
+export {
+  layoutText,
+  textCaret,
+  textSelectionRects,
+  textIndexAt,
+} from './textLayout';
+export type { TextLayout, TextLine, TextSpan, TextMeasure } from './textLayout';

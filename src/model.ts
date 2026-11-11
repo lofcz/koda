@@ -1,3 +1,7 @@
+import { normalizeTextRuns } from './textModel';
+import type { TextRun } from './textModel';
+export type { TextRun, TextStyle, ResolvedTextStyle } from './textModel';
+
 /** The editable document uses image pixels, never CSS pixels or canvas DPR. */
 export type Point = { x: number; y: number };
 export type Matrix = readonly [number, number, number, number, number, number];
@@ -24,11 +28,19 @@ export type Layer = {
   feather?: number;
   erase?: boolean;
   text?: string;
+  /** Structured content is authoritative; text is its plain-text mirror. */
+  textRuns?: readonly TextRun[];
+  textLayout?: 'auto-width' | 'auto-height' | 'fixed';
   fontSize?: number;
   fontFamily?: string;
+  fontWeight?: number;
+  letterSpacing?: number;
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  strike?: boolean;
+  /** Default inline highlight. fill remains the whole text-box background. */
+  textBackground?: string;
   textAlign?: 'left' | 'center' | 'right';
   lineHeight?: number;
   textOutline?: { color: string; width: number };
@@ -717,6 +729,7 @@ export function parseDocument(input: unknown): ImageDocument {
       'bold',
       'italic',
       'underline',
+      'strike',
       'locked',
       'hidden',
     ] as const) {
@@ -757,6 +770,22 @@ export function parseDocument(input: unknown): ImageDocument {
       layer.text = string(v.text);
       layer.fontFamily = string(v.fontFamily, 'sans-serif', 512);
       layer.fontSize = number(v.fontSize, 1, MAX_DIMENSION, 40);
+      if (v.fontWeight !== undefined)
+        layer.fontWeight = number(v.fontWeight, 1, 1000);
+      if (v.letterSpacing !== undefined)
+        layer.letterSpacing = number(v.letterSpacing, -512, 512);
+      if (v.textBackground !== undefined)
+        layer.textBackground = string(v.textBackground, 'transparent', 256);
+      if (v.textLayout !== undefined)
+        layer.textLayout = choice(
+          v.textLayout,
+          ['auto-width', 'auto-height', 'fixed'],
+          'auto-width'
+        );
+      if (v.textRuns !== undefined) {
+        layer.textRuns = normalizeTextRuns(v.textRuns);
+        layer.text = layer.textRuns.map((run) => run.text).join('');
+      }
       layer.lineHeight = number(v.lineHeight, 0.5, 5, 1.2);
       layer.textAlign = choice(
         v.textAlign,

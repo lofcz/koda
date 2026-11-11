@@ -42,6 +42,7 @@ import {
   pathSegments,
   rectFromPoints,
   resizeCursor,
+  resizeTextBox,
   SnapGuide,
   snapMove,
   selectionFrame,
@@ -49,7 +50,15 @@ import {
   transformLayers,
   withPathPoints,
 } from './interactions';
-import { fitView, paintDocument, textSize, View, zoomAt } from './render';
+import { fitTextLayer, fitView, paintDocument, View, zoomAt } from './render';
+import { resolveTextStyle, textContent } from './textModel';
+import {
+  RichTextInput,
+  type RichTextInputHandle,
+  type RichTextRenderer,
+  type RichTextRendererProps,
+} from './RichTextInput';
+import type { TextSelection, TextStyleState } from './richText';
 import type { EditorTool } from './types';
 
 export interface SurfaceActions {
@@ -58,6 +67,8 @@ export interface SurfaceActions {
   actualSize(): void;
   cancel(): void;
   editText(id: string): void;
+  finishText(cancel?: boolean): void;
+  flushText(): void;
   editPath(id: string): void;
   finishPath(closed?: boolean): void;
   deletePathPoint(): void;
@@ -93,6 +104,9 @@ type Props = {
   onImportImage?(file: File): void;
   onCrop(rect: Rect): void;
   onText(id: string): void;
+  renderTextInput?: RichTextRenderer;
+  onTextEditor?(editor: RichTextInputHandle | null): void;
+  onTextSelectionChange?(selection: TextSelection, marks: TextStyleState): void;
   onPathStateChange?(state: PathState): void;
   t(key: string): string;
 };
@@ -173,6 +187,9 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       onImportImage,
       onCrop,
       onText,
+      renderTextInput,
+      onTextEditor,
+      onTextSelectionChange,
       onPathStateChange,
       t,
     },
@@ -181,7 +198,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     const host = useRef<HTMLDivElement>(null),
       lower = useRef<HTMLCanvasElement>(null),
       upper = useRef<HTMLCanvasElement>(null),
-      textarea = useRef<HTMLTextAreaElement>(null);
+      textInput = useRef<RichTextInputHandle | null>(null);
     const [size, setSize] = useState({ width: 1, height: 1 }),
       [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
     const viewRef = useRef(view),
@@ -301,6 +318,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     const finishText = useCallback(
       (cancel = false) => {
         if (!editRef.current) return;
+        if (!cancel) textInput.current?.flush();
         editRef.current = null;
         setEditing(null);
         if (cancel) engine.cancel();
@@ -470,8 +488,8 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     );
     useEffect(() => {
       if (editing) {
-        textarea.current?.focus({ preventScroll: true });
-        textarea.current?.select();
+        textInput.current?.focus();
+        textInput.current?.select();
       }
     }, [editing]);
     useEffect(() => {
@@ -489,6 +507,8 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         fit,
         cancel,
         editText: beginText,
+        finishText,
+        flushText: () => textInput.current?.flush(),
         editPath,
         finishPath,
         deletePathPoint,
@@ -511,6 +531,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         fit,
         cancel,
         beginText,
+        finishText,
         editPath,
         finishPath,
         deletePathPoint,
@@ -773,6 +794,10 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
               ui.stroke();
               handle(r);
               corners.forEach((p) => handle(p));
+              if (layer.kind === 'text') {
+                handle(midpoint(corners[0], corners[3]), 5);
+                handle(midpoint(corners[1], corners[2]), 5);
+              }
             }
           }
         }
@@ -931,6 +956,20 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           cursor: resizeCursor(corners, corner),
           ids: group ? selection : undefined,
         };
+      if (layer.kind === 'text') {
+        const side = [
+          midpoint(corners[0], corners[3]),
+          midpoint(corners[1], corners[2]),
+        ].findIndex((point) => distance(point, p) <= (touch ? 22 : 10));
+        if (side >= 0)
+          return {
+            layer,
+            type: 'resize' as const,
+            corner: side + 4,
+            cursor: 'ew-resize',
+            ids: undefined,
+          };
+      }
       if (distance(rotationHandle(corners), p) <= (touch ? 22 : 12))
         return {
           layer,
@@ -1387,12 +1426,15 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         };
       }
       if (g.type === 'resize')
-        next = resizeLayer(
-          g.layer,
-          g.corner,
-          q,
-          event.shiftKey || g.layer.kind === 'image'
-        );
+        next =
+          g.layer.kind === 'text'
+            ? resizeTextBox(g.layer, g.corner, q, fitTextLayer)
+            : resizeLayer(
+                g.layer,
+                g.corner,
+                q,
+                event.shiftKey || g.layer.kind === 'image'
+              );
       if (g.type === 'endpoint')
         next = moveLineEndpoint(g.layer, g.corner, q, event.shiftKey);
       if (g.type === 'rotate') {
@@ -1707,7 +1749,115 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         );
       }
     };
+    const registerTextEditor = useCallback(
+      (editor: RichTextInputHandle | null) => {
+        textInput.current = editor;
+        onTextEditor?.(editor);
+      },
+      [onTextEditor]
+    );
     const editingLayer = doc.layers.find((layer) => layer.id === editing);
+    const textProps: RichTextRendererProps | null = editingLayer
+      ? {
+          editorRef: registerTextEditor,
+          context: 'canvas',
+          className: 'rie-canvas-text',
+          testId: 'native-canvas-text',
+          ariaLabel: t('text.content'),
+          value: {
+            text: textContent(editingLayer),
+            runs: editingLayer.textRuns,
+          },
+          getValue: () => {
+            const state = engine.getSnapshot();
+            const layer = state.document?.layers.find(
+              (item) =>
+                item.id === editRef.current && item.id === state.selected
+            );
+            return layer
+              ? { text: textContent(layer), runs: layer.textRuns }
+              : null;
+          },
+          defaults: resolveTextStyle(editingLayer),
+          style: {
+            position: 'absolute',
+            zIndex: 5,
+            left: view.x,
+            top: view.y,
+            transformOrigin: '0 0',
+            transform: `matrix(${editingLayer.matrix.map((value) => value * view.zoom).join(',')})`,
+            width: Math.max(1, editingLayer.width),
+            height: editingLayer.height,
+            minHeight:
+              editingLayer.textLayout === 'fixed'
+                ? 0
+                : (editingLayer.fontSize ?? 40) *
+                  (editingLayer.lineHeight ?? 1.2),
+            padding: 0,
+            margin: 0,
+            border: 0,
+            overflow:
+              editingLayer.textLayout === 'fixed' ? 'hidden' : 'visible',
+            boxSizing: 'content-box',
+            fontSize: editingLayer.fontSize ?? 40,
+            fontFamily: editingLayer.fontFamily ?? 'sans-serif',
+            fontWeight:
+              editingLayer.fontWeight ?? (editingLayer.bold ? 700 : 400),
+            fontStyle: editingLayer.italic ? 'italic' : 'normal',
+            lineHeight: editingLayer.lineHeight ?? 1.2,
+            letterSpacing: editingLayer.letterSpacing ?? 0,
+            textAlign: editingLayer.textAlign ?? 'left',
+            textDecoration: 'none',
+            color: editingLayer.color,
+            backgroundColor: editingLayer.fill,
+            opacity: editingLayer.opacity,
+            whiteSpace:
+              !editingLayer.textLayout ||
+              editingLayer.textLayout === 'auto-width'
+                ? 'pre'
+                : 'pre-wrap',
+            overflowWrap: 'anywhere',
+          },
+          onChange: (value) => {
+            const current = engine.getSnapshot().document;
+            const layer = current?.layers.find(
+              (item) => item.id === editRef.current
+            );
+            if (!current || !layer) return;
+            engine.begin();
+            engine.preview(
+              updateLayer(
+                current,
+                layer.id,
+                fitTextLayer({
+                  ...layer,
+                  text: value.text,
+                  textRuns: value.runs,
+                })
+              )
+            );
+          },
+          onFocus: () => onTextEditor?.(textInput.current),
+          onSelectionChange: onTextSelectionChange,
+          onBlur: (event) => {
+            const target = event?.relatedTarget;
+            if (
+              target instanceof HTMLElement &&
+              target.closest('[data-rich-text-toolbar]')
+            )
+              return;
+            finishText();
+          },
+          onCommit: () => {
+            finishText();
+            host.current?.focus({ preventScroll: true });
+          },
+          onCancel: () => {
+            finishText(true);
+            host.current?.focus({ preventScroll: true });
+          },
+        }
+      : null;
     return (
       <div className="rie-canvas-wrap">
         <div
@@ -1814,82 +1964,16 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
                 editPath(layer.id);
             }}
           />
-          {editingLayer && !compare ? (
-            <textarea
-              ref={textarea}
-              className="rie-canvas-text"
-              data-testid="native-canvas-text"
-              aria-label={t('text.content')}
-              value={editingLayer.text ?? ''}
-              spellCheck
-              style={{
-                position: 'absolute',
-                zIndex: 5,
-                left: view.x,
-                top: view.y,
-                transformOrigin: '0 0',
-                transform: `matrix(${editingLayer.matrix.map((value) => value * view.zoom).join(',')})`,
-                width:
-                  Math.max(editingLayer.width, editingLayer.fontSize ?? 40) + 2,
-                height: editingLayer.height + 2,
-                minHeight:
-                  (editingLayer.fontSize ?? 40) *
-                  (editingLayer.lineHeight ?? 1.2),
-                padding: 0,
-                margin: 0,
-                border: 0,
-                resize: 'none',
-                overflow: 'hidden',
-                boxSizing: 'content-box',
-                fontSize: editingLayer.fontSize ?? 40,
-                fontFamily: editingLayer.fontFamily ?? 'sans-serif',
-                fontWeight: editingLayer.bold ? 'bold' : 'normal',
-                fontStyle: editingLayer.italic ? 'italic' : 'normal',
-                lineHeight: editingLayer.lineHeight ?? 1.2,
-                textAlign: editingLayer.textAlign ?? 'left',
-                textDecoration: editingLayer.underline ? 'underline' : 'none',
-                color: editingLayer.color,
-                opacity: editingLayer.opacity,
-                whiteSpace: 'pre',
-                overflowWrap: 'normal',
-              }}
-              onChange={(event) => {
-                const current = engine.getSnapshot().document;
-                if (!current || !editRef.current) return;
-                const text = event.currentTarget.value,
-                  measured = textSize(
-                    text,
-                    editingLayer.fontSize ?? 40,
-                    editingLayer.fontFamily ?? 'sans-serif',
-                    editingLayer.bold,
-                    editingLayer.italic
-                  );
-                // A host export may have finalized the previous edit while focus stayed here.
-                engine.begin();
-                engine.preview(
-                  updateLayer(current, editingLayer.id, {
-                    text,
-                    ...measured,
-                    height:
-                      (measured.height * (editingLayer.lineHeight ?? 1.2)) /
-                      1.2,
-                  })
-                );
-              }}
-              onBlur={() => finishText()}
-              onKeyDown={(event) => {
-                event.stopPropagation();
-                if (event.nativeEvent.isComposing) return;
-                if (
-                  event.key === 'Escape' ||
-                  ((event.ctrlKey || event.metaKey) && event.key === 'Enter')
-                ) {
-                  event.preventDefault();
-                  finishText(event.key === 'Escape');
-                  host.current?.focus({ preventScroll: true });
-                }
-              }}
-            />
+          {textProps && !compare ? (
+            renderTextInput ? (
+              renderTextInput(textProps)
+            ) : (
+              <RichTextInput
+                key={editing}
+                {...textProps}
+                ref={registerTextEditor}
+              />
+            )
           ) : null}
         </div>
         <span id={instructionsId} className="rie-sr-only">

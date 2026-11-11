@@ -1,4 +1,5 @@
 import React, {
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -26,33 +27,89 @@ import {
   reorderLayer,
   scale,
   ShapeKind,
+  TextStyle,
   straightenDocument,
   translate,
   updateLayer,
 } from './model';
-import { filterPixels, textSize } from './render';
+import { filterPixels, fitTextLayer, textSize } from './render';
+import { resolveTextStyle, textContent } from './textModel';
+import {
+  formatRichText,
+  selectedTextStyle,
+  type RichTextValue,
+  type TextSelection,
+  type TextStyleState,
+} from './richText';
+import {
+  RichTextInput,
+  type RichTextInputHandle,
+  type RichTextInputProps,
+  type RichTextRenderer,
+} from './RichTextInput';
 import { Icon } from './icons';
 import { translator } from './locale';
 import type { EditorTool, ImageEditorProps } from './types';
+
+function commonValue<T>(values: readonly T[]): T | null {
+  return values.length && values.every((value) => Object.is(value, values[0]))
+    ? values[0]
+    : null;
+}
+const hasColor = (layer: Layer) =>
+  layer.kind !== 'image' &&
+  (layer.kind !== 'redaction' || layer.redactionMode === 'solid');
+const hasFill = (layer: Layer) =>
+  !['line', 'arrow', 'image', 'redaction'].includes(layer.kind) &&
+  (layer.kind !== 'path' || !!layer.pathClosed);
+const hasStroke = (layer: Layer) =>
+  !['text', 'image', 'redaction'].includes(layer.kind);
+function colorKey(value: string | null): string | null {
+  if (!value) return null;
+  const color = value.toLowerCase();
+  const rgb = color.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+  if (rgb)
+    return `#${rgb
+      .slice(1, 4)
+      .map((part) => Number(part).toString(16).padStart(2, '0'))
+      .join('')}`;
+  if (/^#[\da-f]{3}$/.test(color))
+    return `#${color
+      .slice(1)
+      .split('')
+      .map((part) => part + part)
+      .join('')}`;
+  return color;
+}
 
 function NumberField({
   label,
   value,
   onCommit,
   testId,
+  mixedLabel,
+  step = 1,
+  onStart,
+  onEnd,
   min = 1,
   max = 8192,
 }: {
   label: string;
-  value: number;
+  value: number | null;
   onCommit(value: number): void;
   testId?: string;
+  mixedLabel?: string;
+  step?: number;
+  onStart?(): void;
+  onEnd?(): void;
   min?: number;
   max?: number;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    if (ref.current) ref.current.value = String(Math.round(value * 100) / 100);
+    if (ref.current)
+      ref.current.value =
+        value === null ? '' : String(Math.round(value * 100) / 100);
   }, [value]);
   return (
     <label className="rie-label">
@@ -60,10 +117,15 @@ function NumberField({
       <input
         ref={ref}
         type="number"
-        defaultValue={Math.round(value * 100) / 100}
+        defaultValue={value === null ? '' : Math.round(value * 100) / 100}
+        placeholder={value === null ? mixedLabel : undefined}
+        aria-valuetext={value === null ? mixedLabel : undefined}
+        data-mixed={value === null || undefined}
         min={min}
         max={max}
+        step={step}
         data-testid={testId}
+        onFocus={onStart}
         onChange={(event) => {
           const n = Number(event.target.value);
           if (event.target.value && Number.isFinite(n) && n >= min && n <= max)
@@ -78,7 +140,8 @@ function NumberField({
             n <= max
           )
             onCommit(n);
-          else event.currentTarget.value = String(value);
+          else event.currentTarget.value = value === null ? '' : String(value);
+          onEnd?.();
         }}
         onKeyDown={(event) => {
           if (event.key === 'Enter') event.currentTarget.blur();
@@ -91,14 +154,21 @@ function ColorField({
   label,
   value,
   onChange,
+  mixedLabel,
 }: {
   label: string;
-  value: string;
+  value: string | null;
   onChange(value: string): void;
+  mixedLabel?: string;
 }) {
   return (
     <fieldset className="rie-color-field">
-      <legend>{label}</legend>
+      <legend>
+        {label}
+        {value === null ? (
+          <span className="rie-mixed-label">{mixedLabel}</span>
+        ) : null}
+      </legend>
       <div className="rie-swatches">
         {[
           '#ffffff',
@@ -117,14 +187,15 @@ function ColorField({
             className="rie-swatch"
             style={{ background: color }}
             aria-label={`${label}: ${color}`}
-            aria-pressed={value.toLowerCase() === color}
+            aria-pressed={colorKey(value) === color}
             onClick={() => onChange(color)}
           />
         ))}
         <input
-          aria-label={label}
+          aria-label={value === null ? `${label}: ${mixedLabel}` : label}
           type="color"
-          value={value === 'transparent' ? '#0797a7' : value}
+          value={colorKey(value)?.match(/^#[\da-f]{6}$/)?.[0] ?? '#0797a7'}
+          data-mixed={value === null || undefined}
           onChange={(event) => onChange(event.target.value)}
         />
       </div>
@@ -195,7 +266,7 @@ function ChoicePicker({
   t,
 }: {
   label: string;
-  value: string;
+  value: string | null;
   choices: readonly { value: string; label: string }[];
   onChange(value: string): void;
   t(key: string): string;
@@ -258,7 +329,9 @@ function ChoicePicker({
         }}
       >
         <span id={`${id}-value`}>
-          {choices.find((item) => item.value === value)?.label ?? value}
+          {value === null
+            ? t('selection.mixed')
+            : (choices.find((item) => item.value === value)?.label ?? value)}
         </span>
         <Icon name="chevron_down" />
       </button>
@@ -352,19 +425,26 @@ export function EditorUI({
   onSave,
   onCancel,
   onError,
+  renderTextInput,
 }: {
   engine: CanvasEngine;
   state: EngineState;
   onSave: ImageEditorProps['onSave'];
   onCancel: ImageEditorProps['onCancel'];
   onError: ImageEditorProps['onError'];
+  renderTextInput?: RichTextRenderer;
 }) {
   const doc = state.document,
     t = translator(state.options),
     shell = useRef<HTMLDivElement>(null),
     nav = useRef<HTMLElement>(null),
     surface = useRef<SurfaceActions>(null),
-    textField = useRef<HTMLTextAreaElement>(null),
+    textField = useRef<RichTextInputHandle>(null),
+    canvasTextEditor = useRef<RichTextInputHandle | null>(null),
+    activeTextEditor = useRef<{
+      id: string;
+      handle: RichTextInputHandle;
+    } | null>(null),
     uploadField = useRef<HTMLInputElement>(null),
     straightening = useRef<ImageDocument | null>(null);
   const [tool, setTool] = useState<EditorTool>('select'),
@@ -462,11 +542,74 @@ export function EditorUI({
   }>({ color: '#e5484d', size: 8, mode: 'brush', opacity: 1 });
   const [error, setError] = useState(''),
     [saving, setSaving] = useState(false);
+  const [textSession, setTextSession] = useState<{
+    id: string;
+    selection: TextSelection;
+    marks: TextStyleState;
+  } | null>(null);
+  const onTextEditor = useCallback(
+    (handle: RichTextInputHandle | null) => {
+      const id = engine.getSnapshot().selected;
+      if (handle && id) {
+        canvasTextEditor.current = handle;
+        activeTextEditor.current = { id, handle };
+      } else {
+        if (activeTextEditor.current?.handle === canvasTextEditor.current) {
+          activeTextEditor.current = null;
+          setTextSession(null);
+        }
+        canvasTextEditor.current = null;
+      }
+    },
+    [engine]
+  );
+  const onTextSelection = useCallback(
+    (selection: TextSelection, marks: TextStyleState) => {
+      const id = engine.getSnapshot().selected;
+      if (id)
+        setTextSession((previous) =>
+          previous?.id === id &&
+          previous.selection.anchor === selection.anchor &&
+          previous.selection.focus === selection.focus &&
+          JSON.stringify(previous.marks) === JSON.stringify(marks)
+            ? previous
+            : { id, selection, marks }
+        );
+    },
+    [engine]
+  );
+  const onPanelTextFocus = useCallback(() => {
+    surface.current?.finishText();
+    engine.begin();
+    const id = engine.getSnapshot().selected;
+    if (id && textField.current)
+      activeTextEditor.current = { id, handle: textField.current };
+  }, [engine]);
+  const onPanelTextBlur = useCallback(
+    (event?: { relatedTarget: EventTarget | null }) => {
+      if (
+        event?.relatedTarget instanceof Element &&
+        event.relatedTarget.closest('[data-rich-text-toolbar]')
+      )
+        return;
+      engine.end();
+      activeTextEditor.current = null;
+      setTextSession(null);
+    },
+    [engine]
+  );
+  const cancelPanelText = useCallback(() => {
+    engine.cancel();
+    activeTextEditor.current = null;
+    setTextSession(null);
+  }, [engine]);
   useLayoutEffect(
     () =>
       engine.beforeExport(
-        (tool === 'crop' && doc) || pathState.drawing
+        doc
           ? () => {
+              activeTextEditor.current?.handle.flush();
+              surface.current?.flushText();
               if (pathState.drawing) surface.current?.finishPath();
               if (tool === 'crop' && doc) {
                 engine.commit(cropDocument(doc, crop));
@@ -490,6 +633,42 @@ export function EditorUI({
   const selectedLayers =
     doc?.layers.filter((item) => selectedIds.includes(item.id)) ?? [];
   const isGroup = selectedLayers.length > 1;
+  const textLayers = selectedLayers.filter((item) => item.kind === 'text');
+  const textValue = (item: Layer): RichTextValue => ({
+    text: textContent(item),
+    runs: item.textRuns,
+  });
+  const textMarks: TextStyleState = {};
+  const inlineStyles = textLayers.map((item) => {
+    if (textLayers.length === 1 && !isGroup && textSession?.id === item.id) {
+      return textSession.selection.anchor === textSession.selection.focus
+        ? textSession.marks
+        : selectedTextStyle(
+            textValue(item),
+            textSession.selection,
+            resolveTextStyle(item)
+          );
+    }
+    return selectedTextStyle(
+      textValue(item),
+      { anchor: 0, focus: textContent(item).length },
+      resolveTextStyle(item)
+    );
+  });
+  for (const key of [
+    'fontSize',
+    'fontFamily',
+    'fontWeight',
+    'italic',
+    'underline',
+    'strike',
+    'color',
+    'background',
+    'letterSpacing',
+  ] as const)
+    Object.assign(textMarks, {
+      [key]: commonValue(inlineStyles.map((style) => style[key])),
+    });
   const fullCrop = () =>
     doc
       ? { x: 0, y: 0, width: doc.width, height: doc.height }
@@ -543,14 +722,40 @@ export function EditorUI({
   const previewLayer = (patch: Partial<Layer>) => {
     if (doc && layer) engine.preview(updateLayer(doc, layer.id, patch));
   };
-  const changeSelection = (patch: Partial<Layer>, preview = false) => {
+  const changeSelection = (
+    patch: Partial<Layer>,
+    preview = false,
+    accepts: (item: Layer) => boolean = () => true
+  ) => {
     if (!doc) return;
-    const next = selectedIds.reduce(
-      (document, id) => updateLayer(document, id, patch),
-      doc
-    );
-    if (preview) engine.preview(next);
-    else engine.commit(next);
+    const next = selectedLayers
+      .filter(accepts)
+      .map((item) => item.id)
+      .reduce((document, id) => {
+        const item = document.layers.find((item) => item.id === id)!;
+        if (item.kind === 'text' && patch.color !== undefined) {
+          const value = formatRichText(
+            textValue(item),
+            { anchor: 0, focus: textContent(item).length },
+            { color: patch.color }
+          );
+          return updateLayer(
+            document,
+            id,
+            fitTextLayer({
+              ...item,
+              ...patch,
+              text: value.text,
+              textRuns: value.runs,
+            })
+          );
+        }
+        return updateLayer(document, id, patch);
+      }, doc);
+    if (preview) {
+      engine.begin();
+      engine.preview(next);
+    } else engine.commit(next);
   };
   const gesture = { onStart: () => engine.begin(), onEnd: () => engine.end() };
   const addShape = (kind: ShapeKind) => {
@@ -607,19 +812,76 @@ export function EditorUI({
     requestAnimationFrame(() => surface.current?.editText(item.id));
   };
   const changeText = (patch: Partial<Layer>, preview = false) => {
-    if (!doc || !layer || layer.kind !== 'text') return;
-    const item = { ...layer, ...patch };
-    const size = textSize(
-      item.text ?? '',
-      item.fontSize ?? 40,
-      item.fontFamily ?? 'sans-serif',
-      item.bold,
-      item.italic,
-      item.lineHeight
+    const current = engine.getSnapshot(),
+      document = current.document;
+    if (!document) return;
+    const next = {
+      ...document,
+      layers: document.layers.map((item) =>
+        current.selectedIds.includes(item.id) && item.kind === 'text'
+          ? fitTextLayer({ ...item, ...patch })
+          : item
+      ),
+    };
+    if (preview) {
+      engine.begin();
+      engine.preview(next);
+    } else engine.commit(next);
+  };
+  const changeTextContent = (value: RichTextValue) => {
+    const current = engine.getSnapshot(),
+      document = current.document;
+    if (
+      !document ||
+      !layer ||
+      layer.kind !== 'text' ||
+      current.selected !== layer.id
+    )
+      return;
+    const item = document.layers.find((item) => item.id === layer.id);
+    if (!item) return;
+    engine.begin();
+    engine.preview(
+      updateLayer(
+        document,
+        item.id,
+        fitTextLayer({ ...item, text: value.text, textRuns: value.runs })
+      )
     );
-    const next = updateLayer(doc, layer.id, { ...patch, ...size });
-    if (preview) engine.preview(next);
-    else engine.commit(next);
+  };
+  const formatText = (patch: Partial<TextStyle>, preview = false) => {
+    const current = engine.getSnapshot(),
+      document = current.document,
+      active = activeTextEditor.current;
+    if (!document) return;
+    if (current.selectedIds.length === 1 && active?.id === current.selected) {
+      active.handle.applyFormat(patch);
+      return;
+    }
+    const { background, ...basePatch } = patch;
+    const next = {
+      ...document,
+      layers: document.layers.map((item) => {
+        if (!current.selectedIds.includes(item.id) || item.kind !== 'text')
+          return item;
+        const value = formatRichText(
+          textValue(item),
+          { anchor: 0, focus: textContent(item).length },
+          patch
+        );
+        return fitTextLayer({
+          ...item,
+          ...basePatch,
+          ...(background === undefined ? {} : { textBackground: background }),
+          text: value.text,
+          textRuns: value.runs,
+        });
+      }),
+    };
+    if (preview) {
+      engine.begin();
+      engine.preview(next);
+    } else engine.commit(next);
   };
   const resize = (width: number, height: number) => {
     if (!doc) return;
@@ -779,37 +1041,70 @@ export function EditorUI({
             ))}
           </div>
         </fieldset>
-        <ColorField
-          label={t('draw.color')}
-          value={layer?.color ?? '#0797a7'}
-          onChange={(color) => changeSelection({ color })}
-        />
-        <ColorField
-          label={t('shapes.fill')}
-          value={layer?.fill ?? 'transparent'}
-          onChange={(fill) => changeSelection({ fill })}
-        />
-        <button
-          type="button"
-          onClick={() => changeSelection({ fill: 'transparent' })}
-        >
-          {t('shapes.transparent')}
-        </button>
+        {selectedLayers.some(hasColor) &&
+        !(tool === 'text' && textLayers.length) ? (
+          <ColorField
+            label={t('draw.color')}
+            value={commonValue(
+              selectedLayers
+                .filter(hasColor)
+                .map((item) =>
+                  item.kind === 'text'
+                    ? (selectedTextStyle(
+                        textValue(item),
+                        { anchor: 0, focus: textContent(item).length },
+                        resolveTextStyle(item)
+                      ).color ?? null)
+                    : item.color
+                )
+            )}
+            mixedLabel={t('selection.mixed')}
+            onChange={(color) => changeSelection({ color }, false, hasColor)}
+          />
+        ) : null}
+        {selectedLayers.some(hasFill) ? (
+          <>
+            <ColorField
+              label={t('shapes.fill')}
+              value={commonValue(
+                selectedLayers.filter(hasFill).map((item) => item.fill)
+              )}
+              mixedLabel={t('selection.mixed')}
+              onChange={(fill) => changeSelection({ fill }, false, hasFill)}
+            />
+            <button
+              type="button"
+              onClick={() =>
+                changeSelection({ fill: 'transparent' }, false, hasFill)
+              }
+            >
+              {t('shapes.transparent')}
+            </button>
+          </>
+        ) : null}
+        {selectedLayers.some(hasStroke) ? (
+          <NumberField
+            label={t('shapes.stroke_width')}
+            value={commonValue(
+              selectedLayers.filter(hasStroke).map((item) => item.strokeWidth)
+            )}
+            mixedLabel={t('selection.mixed')}
+            min={0}
+            max={300}
+            onCommit={(strokeWidth) =>
+              changeSelection({ strokeWidth }, false, hasStroke)
+            }
+          />
+        ) : null}
         <NumberField
-          label={t('shapes.stroke_width')}
-          value={layer?.strokeWidth ?? 0}
-          min={0}
-          max={300}
-          onCommit={(strokeWidth) => changeSelection({ strokeWidth })}
-        />
-        <SliderField
           label={t('draw.opacity')}
-          value={Math.round((layer?.opacity ?? 1) * 100)}
-          onChange={(opacity) =>
-            changeSelection({ opacity: opacity / 100 }, true)
-          }
-          {...gesture}
-          suffix="%"
+          value={commonValue(
+            selectedLayers.map((item) => Math.round(item.opacity * 100))
+          )}
+          mixedLabel={t('selection.mixed')}
+          min={0}
+          max={100}
+          onCommit={(opacity) => changeSelection({ opacity: opacity / 100 })}
         />
       </div>
     ) : null;
@@ -859,7 +1154,7 @@ export function EditorUI({
           <Icon name="hidden" />
         </button>
       </div>
-      {layer.kind !== 'image' ? (
+      {!['image', 'text'].includes(layer.kind) ? (
         <ColorField
           label={t('draw.color')}
           value={layer.color}
@@ -1117,42 +1412,44 @@ export function EditorUI({
           )
         }
       />
-      <div className="rie-grid">
-        <NumberField
-          label={t('resize.width')}
-          value={layer.width * Math.hypot(layer.matrix[0], layer.matrix[1])}
-          onCommit={(width) =>
-            changeLayer({
-              matrix: multiply(
-                layer.matrix,
-                scale(
-                  width /
-                    (layer.width *
-                      Math.hypot(layer.matrix[0], layer.matrix[1])),
-                  1
-                )
-              ),
-            })
-          }
-        />
-        <NumberField
-          label={t('resize.height')}
-          value={layer.height * Math.hypot(layer.matrix[2], layer.matrix[3])}
-          onCommit={(height) =>
-            changeLayer({
-              matrix: multiply(
-                layer.matrix,
-                scale(
-                  1,
-                  height /
-                    (layer.height *
-                      Math.hypot(layer.matrix[2], layer.matrix[3]))
-                )
-              ),
-            })
-          }
-        />
-      </div>
+      {layer.kind !== 'text' ? (
+        <div className="rie-grid">
+          <NumberField
+            label={t('resize.width')}
+            value={layer.width * Math.hypot(layer.matrix[0], layer.matrix[1])}
+            onCommit={(width) =>
+              changeLayer({
+                matrix: multiply(
+                  layer.matrix,
+                  scale(
+                    width /
+                      (layer.width *
+                        Math.hypot(layer.matrix[0], layer.matrix[1])),
+                    1
+                  )
+                ),
+              })
+            }
+          />
+          <NumberField
+            label={t('resize.height')}
+            value={layer.height * Math.hypot(layer.matrix[2], layer.matrix[3])}
+            onCommit={(height) =>
+              changeLayer({
+                matrix: multiply(
+                  layer.matrix,
+                  scale(
+                    1,
+                    height /
+                      (layer.height *
+                        Math.hypot(layer.matrix[2], layer.matrix[3]))
+                  )
+                ),
+              })
+            }
+          />
+        </div>
+      ) : null}
     </div>
   ) : (
     <p className="rie-help">{t('selection.hint')}</p>
@@ -1380,109 +1677,318 @@ export function EditorUI({
         />
       </>
     );
-  if (tool === 'text')
+  if (tool === 'text') {
+    const CustomTextInput = renderTextInput;
+    const weight = textMarks.fontWeight;
+    const inputProps: RichTextInputProps | null =
+      layer?.kind === 'text' && !isGroup
+        ? {
+            value: textValue(layer),
+            getValue: () => {
+              const current = engine.getSnapshot();
+              const item = current.document?.layers.find(
+                (item) => item.id === layer.id && item.kind === 'text'
+              );
+              return current.selected === layer.id && item
+                ? textValue(item)
+                : null;
+            },
+            defaults: resolveTextStyle(layer),
+            onChange: changeTextContent,
+            onSelectionChange: onTextSelection,
+            onFocus: onPanelTextFocus,
+            onBlur: onPanelTextBlur,
+            onCommit: () => engine.end(),
+            onCancel: cancelPanelText,
+            className: 'rie-panel-text',
+            ariaLabel: t('text.content'),
+            testId: 'native-text-content',
+          }
+        : null;
     controls = (
       <>
-        <button
-          type="button"
-          className="rie-primary"
-          data-testid="native-text-add"
-          onClick={addText}
-        >
-          <Icon name="text" />
-          {t('text.add')}
-        </button>
-        {layer?.kind === 'text' && !isGroup ? (
+        {textLayers.length ? (
           <>
-            <label className="rie-label">
-              <span>{t('text.content')}</span>
-              <textarea
-                ref={textField}
-                data-testid="native-text-content"
-                value={layer.text ?? ''}
-                onFocus={() => engine.begin()}
-                onBlur={() => engine.end()}
-                onChange={(event) =>
-                  changeText({ text: event.target.value }, true)
-                }
-              />
-            </label>
-            <NumberField
-              label={t('text.font_size')}
-              value={layer.fontSize ?? 40}
-              max={1000}
-              testId="native-text-size"
-              onCommit={(fontSize) => changeText({ fontSize })}
-            />
-            <ChoicePicker
-              label={t('text.font_family')}
-              value={layer.fontFamily ?? 'sans-serif'}
-              choices={[
-                { value: 'sans-serif', label: t('text.sans') },
-                { value: 'serif', label: t('text.serif') },
-                { value: 'monospace', label: t('text.mono') },
-                { value: 'Arial, sans-serif', label: 'Arial' },
-                { value: 'Georgia, serif', label: 'Georgia' },
-                { value: 'Verdana, sans-serif', label: 'Verdana' },
-                { value: '"Trebuchet MS", sans-serif', label: 'Trebuchet MS' },
-              ]}
-              onChange={(fontFamily) => changeText({ fontFamily })}
-              t={t}
-            />
-            <div className="rie-row">
-              <button
-                type="button"
-                aria-pressed={!!layer.bold}
-                onClick={() => changeText({ bold: !layer.bold })}
+            <div className="rie-text-formatting" data-rich-text-toolbar>
+              <div
+                className="rie-text-toolbar"
+                role="toolbar"
+                aria-label={t('text.formatting')}
               >
-                {t('text.bold')}
-              </button>
-              <button
-                type="button"
-                aria-pressed={!!layer.italic}
-                onClick={() => changeText({ italic: !layer.italic })}
-              >
-                {t('text.italic')}
-              </button>
-              <button
-                type="button"
-                aria-pressed={!!layer.underline}
-                onClick={() => changeText({ underline: !layer.underline })}
-              >
-                {t('text.underline')}
-              </button>
-            </div>
-            <div className="rie-row">
-              {(['left', 'center', 'right'] as const).map((textAlign) => (
+                {(
+                  ['bold', 'italic', 'underline', 'strikethrough'] as const
+                ).map((name) => {
+                  const pressed =
+                    name === 'bold'
+                      ? weight === null
+                        ? null
+                        : (weight ?? 400) >= 600
+                      : textMarks[name === 'strikethrough' ? 'strike' : name];
+                  return (
+                    <button
+                      key={name}
+                      type="button"
+                      className="rie-icon-button"
+                      aria-label={t(`text.${name}`)}
+                      title={t(`text.${name}`)}
+                      aria-pressed={pressed === null ? 'mixed' : !!pressed}
+                      onPointerDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        if (name === 'bold')
+                          formatText({
+                            fontWeight: pressed === true ? 400 : 700,
+                          });
+                        else
+                          formatText({
+                            [name === 'strikethrough' ? 'strike' : name]:
+                              pressed !== true,
+                          });
+                      }}
+                    >
+                      <Icon name={name} />
+                    </button>
+                  );
+                })}
                 <button
-                  key={textAlign}
                   type="button"
                   className="rie-icon-button"
-                  aria-label={t(`text.align_${textAlign}`)}
-                  title={t(`text.align_${textAlign}`)}
-                  aria-pressed={(layer.textAlign ?? 'left') === textAlign}
-                  onClick={() => changeText({ textAlign })}
+                  aria-label={t('text.add')}
+                  title={t('text.add')}
+                  data-testid="native-text-add"
+                  onClick={addText}
                 >
-                  <Icon name={`align_${textAlign}`} />
+                  <Icon name="text" />
                 </button>
-              ))}
+              </div>
             </div>
-            <SliderField
-              label={t('text.line_height')}
-              min={0.8}
-              max={2.4}
-              step={0.1}
-              value={layer.lineHeight ?? 1.2}
-              onChange={(lineHeight) => changeText({ lineHeight }, true)}
-              {...gesture}
-            />
+            {layer?.kind === 'text' && !isGroup ? (
+              CustomTextInput ? (
+                <CustomTextInput
+                  {...inputProps!}
+                  context="panel"
+                  editorRef={textField}
+                />
+              ) : (
+                <RichTextInput
+                  key={layer!.id}
+                  ref={textField}
+                  {...inputProps!}
+                />
+              )
+            ) : (
+              <p className="rie-help">
+                {t('text.selected_objects').replace(
+                  '{count}',
+                  String(textLayers.length)
+                )}
+              </p>
+            )}
+            {layer?.kind === 'text' && !isGroup ? (
+              <p
+                className="rie-help rie-text-color-hint"
+                data-testid="native-text-panel-color-hint"
+              >
+                {t('text.panel_colors_hint')}
+              </p>
+            ) : null}
+            <div
+              className="rie-stack rie-text-formatting"
+              data-rich-text-toolbar
+            >
+              <ChoicePicker
+                label={t('text.font_family')}
+                value={textMarks.fontFamily ?? null}
+                choices={[
+                  { value: 'sans-serif', label: t('text.sans') },
+                  { value: 'serif', label: t('text.serif') },
+                  { value: 'monospace', label: t('text.mono') },
+                  { value: 'Arial, sans-serif', label: 'Arial' },
+                  { value: 'Georgia, serif', label: 'Georgia' },
+                  { value: 'Verdana, sans-serif', label: 'Verdana' },
+                  {
+                    value: '"Trebuchet MS", sans-serif',
+                    label: 'Trebuchet MS',
+                  },
+                ]}
+                onChange={(fontFamily) => formatText({ fontFamily })}
+                t={t}
+              />
+              <div className="rie-grid">
+                <NumberField
+                  label={t('text.font_size')}
+                  value={textMarks.fontSize ?? null}
+                  mixedLabel={t('selection.mixed')}
+                  max={1000}
+                  testId="native-text-size"
+                  onCommit={(fontSize) => formatText({ fontSize }, true)}
+                  {...gesture}
+                />
+                <NumberField
+                  label={t('text.font_weight')}
+                  value={weight ?? null}
+                  mixedLabel={t('selection.mixed')}
+                  min={1}
+                  max={1000}
+                  step={1}
+                  testId="native-text-weight"
+                  onCommit={(fontWeight) => formatText({ fontWeight }, true)}
+                  {...gesture}
+                />
+              </div>
+              <ColorField
+                label={t('draw.color')}
+                value={textMarks.color ?? null}
+                mixedLabel={t('selection.mixed')}
+                onChange={(color) => formatText({ color })}
+              />
+              <details className="rie-advanced">
+                <summary>{t('text.highlight')}</summary>
+                <div className="rie-stack">
+                  <ColorField
+                    label={t('text.highlight')}
+                    value={textMarks.background ?? null}
+                    mixedLabel={t('selection.mixed')}
+                    onChange={(background) => formatText({ background })}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => formatText({ background: 'transparent' })}
+                  >
+                    {t('text.clear_highlight')}
+                  </button>
+                </div>
+              </details>
+              <div className="rie-row">
+                {(['left', 'center', 'right'] as const).map((textAlign) => (
+                  <button
+                    key={textAlign}
+                    type="button"
+                    className="rie-icon-button"
+                    aria-label={t(`text.align_${textAlign}`)}
+                    title={t(`text.align_${textAlign}`)}
+                    aria-pressed={
+                      commonValue(
+                        textLayers.map((item) => item.textAlign ?? 'left')
+                      ) === textAlign
+                    }
+                    onClick={() => changeText({ textAlign })}
+                  >
+                    <Icon name={`align_${textAlign}`} />
+                  </button>
+                ))}
+              </div>
+              <div className="rie-grid">
+                <NumberField
+                  label={t('text.line_height')}
+                  value={commonValue(
+                    textLayers.map((item) => item.lineHeight ?? 1.2)
+                  )}
+                  mixedLabel={t('selection.mixed')}
+                  min={0.5}
+                  max={4}
+                  step={0.1}
+                  testId="native-text-line-height"
+                  onCommit={(lineHeight) => changeText({ lineHeight }, true)}
+                  {...gesture}
+                />
+                <NumberField
+                  label={t('text.letter_spacing')}
+                  value={textMarks.letterSpacing ?? null}
+                  mixedLabel={t('selection.mixed')}
+                  min={-512}
+                  max={512}
+                  step={0.1}
+                  testId="native-text-spacing"
+                  onCommit={(letterSpacing) =>
+                    formatText({ letterSpacing }, true)
+                  }
+                  {...gesture}
+                />
+              </div>
+              <details
+                className="rie-advanced"
+                data-testid="native-text-layout-controls"
+              >
+                <summary>{t('text.layout')}</summary>
+                <div className="rie-stack">
+                  <ChoicePicker
+                    label={t('text.layout')}
+                    value={commonValue(
+                      textLayers.map((item) => item.textLayout ?? 'auto-width')
+                    )}
+                    choices={[
+                      {
+                        value: 'auto-width',
+                        label: t('text.layout_auto_width'),
+                      },
+                      {
+                        value: 'auto-height',
+                        label: t('text.layout_auto_height'),
+                      },
+                      { value: 'fixed', label: t('text.layout_fixed') },
+                    ]}
+                    onChange={(textLayout) =>
+                      changeText({
+                        textLayout: textLayout as Layer['textLayout'],
+                      })
+                    }
+                    t={t}
+                  />
+                  {(['auto-width', 'auto-height', 'fixed'] as const).map(
+                    (mode) =>
+                      commonValue(
+                        textLayers.map(
+                          (item) => item.textLayout ?? 'auto-width'
+                        )
+                      ) === mode ? (
+                        <p key={mode} className="rie-help">
+                          {t(`text.layout_${mode.replace('-', '_')}_hint`)}
+                        </p>
+                      ) : null
+                  )}
+                  {textLayers.every(
+                    (item) =>
+                      item.textLayout === 'auto-height' ||
+                      item.textLayout === 'fixed'
+                  ) ? (
+                    <NumberField
+                      label={t('text.box_width')}
+                      value={commonValue(textLayers.map((item) => item.width))}
+                      mixedLabel={t('selection.mixed')}
+                      testId="native-text-box-width"
+                      onCommit={(width) => changeText({ width }, true)}
+                      {...gesture}
+                    />
+                  ) : null}
+                  {textLayers.every((item) => item.textLayout === 'fixed') ? (
+                    <NumberField
+                      label={t('text.box_height')}
+                      value={commonValue(textLayers.map((item) => item.height))}
+                      mixedLabel={t('selection.mixed')}
+                      testId="native-text-box-height"
+                      onCommit={(height) => changeText({ height }, true)}
+                      {...gesture}
+                    />
+                  ) : null}
+                </div>
+              </details>
+            </div>
             {selectedControls}
           </>
         ) : (
-          groupControls
+          <button
+            type="button"
+            className="rie-primary"
+            data-testid="native-text-add"
+            onClick={addText}
+          >
+            <Icon name="text" />
+            {t('text.add')}
+          </button>
         )}
       </>
     );
+  }
   if (tool === 'shapes')
     controls = (
       <>
@@ -2222,6 +2728,9 @@ export function EditorUI({
             cropRatio={ratio}
             onCrop={setCrop}
             onText={editText}
+            renderTextInput={renderTextInput}
+            onTextEditor={onTextEditor}
+            onTextSelectionChange={onTextSelection}
             compare={compare}
             onViewChange={setView}
             onCropApply={closePanel}

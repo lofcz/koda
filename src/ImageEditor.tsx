@@ -148,6 +148,7 @@ function ImageEditorInner(
               onSave={props.onSave}
               onCancel={props.onCancel}
               onError={props.onError}
+              renderTextInput={props.renderTextInput}
             />
           ) : null}
           {state.error && state.phase === 'ready' ? (

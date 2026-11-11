@@ -1,6 +1,7 @@
 import {
   clamp,
   ImageDocument,
+  inverse,
   Layer,
   layerCorners,
   Matrix,
@@ -12,6 +13,39 @@ import {
   transform,
   translate,
 } from './model';
+
+/** Text handles resize layout bounds in local coordinates, retaining glyph transforms. */
+export function resizeTextBox(
+  layer: Layer,
+  handle: number,
+  point: Point,
+  fit: (layer: Layer) => Layer
+): Layer {
+  const local = transform(inverse(layer.matrix), point);
+  const left = handle === 0 || handle === 3 || handle === 4;
+  const top = handle === 0 || handle === 1;
+  const side = handle >= 4;
+  const width = Math.max(1, left ? layer.width - local.x : local.x);
+  const height = side
+    ? layer.height
+    : Math.max(1, top ? layer.height - local.y : local.y);
+  const next = fit({
+    ...layer,
+    width,
+    height,
+    textLayout: layer.textLayout === 'fixed' ? 'fixed' : 'auto-height',
+  });
+  return {
+    ...next,
+    matrix: multiply(
+      layer.matrix,
+      translate(
+        left ? layer.width - next.width : 0,
+        !side && top ? layer.height - next.height : 0
+      )
+    ),
+  };
+}
 
 export type CropHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 export type CropMode = CropHandle | 'move' | 'new';

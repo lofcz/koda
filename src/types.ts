@@ -1,6 +1,7 @@
 import type { CSSProperties, ReactNode } from 'react';
 import type { ImageDocument } from './model';
 import type { ImageExportOptions } from './exportOptions';
+import type { RichTextRenderer } from './RichTextInput';
 export type { ImageExportOptions } from './exportOptions';
 export type {
   ImageDocument,
@@ -11,6 +12,9 @@ export type {
   Point,
   Rect,
   LineEnd,
+  TextRun,
+  TextStyle,
+  ResolvedTextStyle,
 } from './model';
 export type ImageEditorLocale = 'en' | 'cs' | 'sk' | 'pl' | (string & {});
 export type ImageEditorTranslations = Record<string, Record<string, string>>;
@@ -115,6 +119,8 @@ export type ImageEditorErrorFallback =
   ReactNode | ((error: Error, retry: () => void) => ReactNode);
 export interface ImageEditorProps {
   image: string;
+  /** Reuse a host rich editor with the same controlled content and selection contract. */
+  renderTextInput?: RichTextRenderer;
   options?: ImageEditorOptions;
   editorId?: string;
   minHeight?: number | string;

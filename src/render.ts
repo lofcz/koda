@@ -9,9 +9,81 @@ import {
 } from './model';
 import type { ImageExportOptions } from './types';
 import { resolveExportSize } from './exportOptions';
+import { layoutText } from './textLayout';
+import type { TextMeasure } from './textLayout';
+import { graphemes, textContent } from './textModel';
+import type { ResolvedTextStyle } from './textModel';
 
 export type ImageAssets = ReadonlyMap<string, CanvasImageSource>;
 const EMPTY_ASSETS: ImageAssets = new Map();
+
+function setTextFont(ctx: CanvasRenderingContext2D, style: ResolvedTextStyle) {
+  ctx.font = `${style.italic ? 'italic ' : ''}${style.fontWeight} ${style.fontSize}px ${style.fontFamily}`;
+  if (typeof ctx.letterSpacing === 'string')
+    ctx.letterSpacing = `${style.letterSpacing}px`;
+}
+
+function canvasTextMeasure(ctx: CanvasRenderingContext2D): TextMeasure {
+  return (text, style) => {
+    setTextFont(ctx, style);
+    ctx.textBaseline = 'alphabetic';
+    const metrics = ctx.measureText(text);
+    let width = metrics.width;
+    if (typeof ctx.letterSpacing !== 'string' && style.letterSpacing)
+      width = graphemes(text).reduce(
+        (n, cluster) =>
+          n + ctx.measureText(cluster.text).width + style.letterSpacing,
+        0
+      );
+    return {
+      width,
+      ascent: metrics.fontBoundingBoxAscent ?? style.fontSize * 0.8,
+      descent: metrics.fontBoundingBoxDescent ?? style.fontSize * 0.2,
+    };
+  };
+}
+function paintText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  baseline: number,
+  style: ResolvedTextStyle,
+  outline = false
+) {
+  const paint = (value: string, left: number) =>
+    outline
+      ? ctx.strokeText(value, left, baseline)
+      : ctx.fillText(value, left, baseline);
+  if (typeof ctx.letterSpacing === 'string' || !style.letterSpacing) {
+    paint(text, x);
+    return;
+  }
+  for (const cluster of graphemes(text)) {
+    paint(cluster.text, x);
+    x += ctx.measureText(cluster.text).width + style.letterSpacing;
+  }
+}
+
+let textContext: CanvasRenderingContext2D | null = null;
+/** Shared by the inspector, canvas editor and renderer; fonts must be loaded before measuring. */
+export function measureTextLayer(layer: Layer) {
+  textContext ??= document.createElement('canvas').getContext('2d');
+  if (!textContext) throw new Error('Canvas2D is unavailable');
+  return layoutText(layer, canvasTextMeasure(textContext));
+}
+/** Reflow a text edit without changing its local transform or fixed box ownership. */
+export function fitTextLayer(layer: Layer): Layer {
+  const measured = measureTextLayer({
+    ...layer,
+    textLayout: layer.textLayout ?? 'auto-width',
+  });
+  return {
+    ...layer,
+    text: textContent(layer),
+    width: measured.width,
+    height: measured.height,
+  };
+}
 
 function apply(ctx: CanvasRenderingContext2D, m: Matrix) {
   ctx.transform(...m);
@@ -140,58 +212,68 @@ export function renderLayer(
   } else if (layer.kind === 'redaction') {
     redact(ctx, layer, backdrop);
   } else if (layer.kind === 'text') {
+    const layout = layoutText(layer, canvasTextMeasure(ctx));
+    if (layer.textLayout === 'fixed' || layer.textLayout === 'auto-height') {
+      ctx.beginPath();
+      ctx.rect(0, 0, layout.width, layout.height);
+      ctx.clip();
+    }
     if (layer.fill !== 'transparent')
-      ctx.fillRect(0, 0, layer.width, layer.height);
-    const size = layer.fontSize ?? 40;
-    ctx.font = `${layer.italic ? 'italic ' : ''}${layer.bold ? 'bold ' : ''}${size}px ${layer.fontFamily ?? 'sans-serif'}`;
-    ctx.textBaseline = 'top';
-    ctx.textAlign = layer.textAlign ?? 'left';
-    ctx.fillStyle = layer.color;
-    const x =
-        layer.textAlign === 'center'
-          ? layer.width / 2
-          : layer.textAlign === 'right'
-            ? layer.width
-            : 0,
-      lineHeight = layer.lineHeight ?? 1.2;
-    (layer.text ?? '').split('\n').forEach((line, i) => {
-      const y = i * size * lineHeight;
-      const shadow = layer.textShadow;
-      if (shadow) {
-        ctx.shadowColor = shadow.color;
-        ctx.shadowBlur =
-          shadow.blur *
-          Math.sqrt(
-            Math.abs(
-              layer.matrix[0] * layer.matrix[3] -
-                layer.matrix[1] * layer.matrix[2]
-            )
-          );
-        ctx.shadowOffsetX =
-          layer.matrix[0] * shadow.offsetX + layer.matrix[2] * shadow.offsetY;
-        ctx.shadowOffsetY =
-          layer.matrix[1] * shadow.offsetX + layer.matrix[3] * shadow.offsetY;
+      ctx.fillRect(0, 0, layout.width, layout.height);
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+    for (const line of layout.lines) {
+      for (const span of line.spans) {
+        if (span.style.background !== 'transparent') {
+          ctx.fillStyle = span.style.background;
+          ctx.fillRect(span.x, line.y, span.width, line.height);
+        }
       }
-      if (layer.textOutline?.width) {
-        ctx.lineWidth = layer.textOutline.width * 2;
-        ctx.strokeStyle = layer.textOutline.color;
-        ctx.strokeText(line, x, y);
+      for (const span of line.spans) {
+        const { style, text, x, baseline } = span;
+        setTextFont(ctx, style);
+        ctx.fillStyle = style.color;
+        const shadow = layer.textShadow;
+        if (shadow) {
+          ctx.shadowColor = shadow.color;
+          ctx.shadowBlur =
+            shadow.blur *
+            Math.sqrt(
+              Math.abs(
+                layer.matrix[0] * layer.matrix[3] -
+                  layer.matrix[1] * layer.matrix[2]
+              )
+            );
+          ctx.shadowOffsetX =
+            layer.matrix[0] * shadow.offsetX + layer.matrix[2] * shadow.offsetY;
+          ctx.shadowOffsetY =
+            layer.matrix[1] * shadow.offsetX + layer.matrix[3] * shadow.offsetY;
+        }
+        if (layer.textOutline?.width) {
+          ctx.lineWidth = layer.textOutline.width * 2;
+          ctx.strokeStyle = layer.textOutline.color;
+          paintText(ctx, text, x, baseline, style, true);
+          ctx.shadowColor = 'transparent';
+        }
+        paintText(ctx, text, x, baseline, style);
         ctx.shadowColor = 'transparent';
+        const thickness = Math.max(1, style.fontSize / 16);
+        if (style.underline)
+          ctx.fillRect(
+            x,
+            baseline + style.fontSize * 0.1,
+            span.width,
+            thickness
+          );
+        if (style.strike)
+          ctx.fillRect(
+            x,
+            baseline - style.fontSize * 0.3,
+            span.width,
+            thickness
+          );
       }
-      ctx.fillText(line, x, y);
-      ctx.shadowColor = 'transparent';
-      if (layer.underline && line) {
-        const width = ctx.measureText(line).width,
-          left =
-            x -
-            (layer.textAlign === 'center'
-              ? width / 2
-              : layer.textAlign === 'right'
-                ? width
-                : 0);
-        ctx.fillRect(left, y + size * 1.02, width, Math.max(1, size / 16));
-      }
-    });
+    }
   } else {
     ctx.beginPath();
     if (layer.kind === 'path') {
@@ -777,16 +859,25 @@ export function textSize(
   italic = false,
   lineHeight = 1.2
 ) {
-  const ctx = document.createElement('canvas').getContext('2d');
-  if (!ctx) throw new Error('Canvas2D is unavailable');
-  ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${fontSize}px ${fontFamily}`;
-  return {
-    width: Math.max(
-      fontSize,
-      ...text.split('\n').map((line) => ctx.measureText(line).width)
-    ),
-    height: Math.max(1, text.split('\n').length) * fontSize * lineHeight,
-  };
+  const measured = measureTextLayer({
+    id: '',
+    kind: 'text',
+    matrix: [1, 0, 0, 1, 0, 0],
+    width: fontSize,
+    height: fontSize,
+    text,
+    fontSize,
+    fontFamily,
+    bold,
+    italic,
+    lineHeight,
+    textLayout: 'auto-width',
+    color: '#000000',
+    fill: 'transparent',
+    strokeWidth: 0,
+    opacity: 1,
+  });
+  return { width: measured.width, height: measured.height };
 }
 export type View = { zoom: number; x: number; y: number };
 export function fitView(
