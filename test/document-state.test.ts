@@ -5,6 +5,7 @@ import {
   flipLayer,
   layerCorners,
   parseDocument,
+  hitLayer,
   pathLayer,
   reorderLayer,
   resizeDocument,
@@ -32,6 +33,81 @@ it('straightening preserves the center and applies the same transform to the pho
     height: 200,
   });
   expect(() => straightenDocument(doc, NaN)).toThrow();
+});
+
+it('editable polygon and annotation styles survive validated snapshots and follow polygon hit geometry', () => {
+  const polygon = pathLayer(
+      [
+        { x: 0, y: 0 },
+        { x: 40, y: 0 },
+        { x: 0, y: 40 },
+      ],
+      {
+        pathClosed: true,
+        pathEditable: true,
+        fill: '#0f0',
+        strokeWidth: 0,
+        strokeDash: [4, 4],
+        strokeCap: 'butt',
+        strokeJoin: 'bevel',
+        feather: 2,
+      }
+    ),
+    text = {
+      ...pathLayer([]),
+      kind: 'text' as const,
+      text: 'Title',
+      textOutline: { color: '#fff', width: 2 },
+      textShadow: { color: '#000', blur: 3, offsetX: 4, offsetY: 5 },
+    },
+    doc = { ...createDocument(100, 100), layers: [polygon, text] },
+    parsed = parseDocument(doc);
+  expect(parsed).toMatchObject(doc);
+  expect(parsed.layers[1].textShadow).not.toBe(text.textShadow);
+  expect(hitLayer(polygon, { x: 10, y: 10 }, 0)).toBe(true);
+  expect(hitLayer(polygon, { x: 35, y: 35 }, 0)).toBe(false);
+  expect(
+    hitLayer({ ...polygon, fill: 'transparent' }, { x: 10, y: 10 }, 0)
+  ).toBe(false);
+  expect(
+    hitLayer({ ...polygon, fill: 'transparent' }, { x: 20, y: 20 }, 0)
+  ).toBe(true);
+  expect(() =>
+    parseDocument({ ...doc, layers: [{ ...polygon, strokeDash: [-1] }] })
+  ).toThrow();
+});
+
+it('rounded rectangle hit testing ignores transparent corners after affine transforms', () => {
+  const layer = {
+    ...pathLayer([]),
+    kind: 'rectangle' as const,
+    width: 40,
+    height: 40,
+    cornerRadius: 20,
+    fill: '#fff',
+    strokeWidth: 0,
+    matrix: [0, 2, -1, 0, 50, 10] as const,
+  };
+  expect(hitLayer(layer, transform(layer.matrix, { x: 0, y: 0 }), 0)).toBe(
+    false
+  );
+  expect(hitLayer(layer, transform(layer.matrix, { x: 20, y: 20 }), 0)).toBe(
+    true
+  );
+  expect(
+    hitLayer(
+      { ...layer, fill: 'transparent' },
+      transform(layer.matrix, { x: 20, y: 20 }),
+      0
+    )
+  ).toBe(false);
+  expect(
+    hitLayer(
+      { ...layer, fill: 'transparent' },
+      transform(layer.matrix, { x: 20, y: 0 }),
+      0
+    )
+  ).toBe(true);
 });
 
 it('flipping a layer preserves its center and reversing twice restores every corner', () => {

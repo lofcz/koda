@@ -1,4 +1,5 @@
 import { vi } from 'vitest';
+import { Blob as NodeBlob } from 'node:buffer';
 import { CanvasEngine, LoadedImage } from '../src/engine';
 import { cropDocument, pathLayer, resizeDocument } from '../src/model';
 import { exportCanvas } from '../src/render';
@@ -585,4 +586,77 @@ it('unsupported encoders and an encoding failure preserve document history', asy
   await expect(engine.getBlob()).rejects.toThrow('Image export failed');
   expect(engine.getSnapshot().document).toBe(doc);
   expect(engine.hasChanges()).toBe(false);
+});
+
+it('source bytes and output settings remain independent of edits and failed resets', async () => {
+  const sourceBlob = new NodeBlob(['original encoded source'], {
+      type: 'image/png',
+    }),
+    loader = vi
+      .fn()
+      .mockResolvedValueOnce({ ...image(), sourceBlob })
+      .mockRejectedValueOnce(new Error('missing')),
+    engine = new CanvasEngine(loader);
+  await expect(engine.getSourceBlob()).rejects.toThrow('not ready');
+  await engine.reset('base');
+  engine.commit(resizeDocument(engine.getSnapshot().document!, 20, 12));
+  engine.updateOptions({
+    export: {
+      type: 'image/jpeg',
+      quality: 0.7,
+      fit: 'contain',
+      upscale: false,
+      width: 10,
+    },
+  });
+  const settings = engine.getExportOptions();
+  settings.width = 99;
+  expect(engine.getExportOptions().width).toBe(10);
+  expect(await engine.getSourceBlob()).toBe(sourceBlob);
+  await expect(engine.reset('missing')).rejects.toThrow();
+  expect(await engine.getSourceBlob()).toBe(sourceBlob);
+  expect(engine.getSnapshot().document).toMatchObject({
+    width: 20,
+    height: 12,
+  });
+  const custom = await ready();
+  custom.commit(resizeDocument(custom.getSnapshot().document!, 20, 12));
+  custom.updateOptions({ export: { type: 'image/jpeg', width: 10 } });
+  expect(JSON.parse(await (await custom.getSourceBlob()).text())).toMatchObject(
+    { width: 100, height: 60, layers: [] }
+  );
+});
+
+it('multi-selection deduplicates and prunes IDs while group removal is one history step', async () => {
+  const engine = await ready(),
+    a = pathLayer([]),
+    b = pathLayer([]),
+    locked = { ...pathLayer([]), locked: true },
+    doc = { ...engine.getSnapshot().document!, layers: [a, b, locked] };
+  engine.commit(doc);
+  engine.selectMany([a.id, b.id, a.id, locked.id, 'missing']);
+  expect(engine.getSnapshot()).toMatchObject({
+    selectedIds: [a.id, b.id],
+    selected: b.id,
+  });
+  engine.toggleSelection(a.id);
+  expect(engine.getSnapshot().selectedIds).toEqual([b.id]);
+  engine.toggleSelection(a.id);
+  expect(engine.getSnapshot().selected).toBe(a.id);
+  engine.removeSelected();
+  expect(engine.getSnapshot()).toMatchObject({
+    selected: null,
+    selectedIds: [],
+  });
+  expect(engine.getSnapshot().document!.layers).toEqual([locked]);
+  engine.undo();
+  expect(engine.getSnapshot().document).toBe(doc);
+  engine.selectMany([a.id, b.id]);
+  engine.commit({ ...doc, layers: [a, { ...b, hidden: true }, locked] });
+  expect(engine.getSnapshot()).toMatchObject({
+    selectedIds: [a.id],
+    selected: a.id,
+  });
+  engine.select(null);
+  expect(engine.getSnapshot().selectedIds).toEqual([]);
 });

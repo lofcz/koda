@@ -1,5 +1,7 @@
 import type { CSSProperties, ReactNode } from 'react';
 import type { ImageDocument } from './model';
+import type { ImageExportOptions } from './exportOptions';
+export type { ImageExportOptions } from './exportOptions';
 export type {
   ImageDocument,
   Layer,
@@ -25,20 +27,12 @@ export type EditorTool =
   | 'frame'
   | 'fill'
   | 'redact';
-export interface ImageExportOptions {
-  /** Defaults to PNG, preserving transparency. JPEG defaults to a white background. */
-  type?: 'image/png' | 'image/jpeg' | 'image/webp';
-  /** Lossy encoder quality from 0 to 1. Ignored by PNG. */
-  quality?: number;
-  /** Omitting either dimension preserves the document aspect ratio. */
-  width?: number;
-  height?: number;
-  background?: string;
-}
 export interface ImageEditorLoadedImage {
   source: CanvasImageSource;
   width: number;
   height: number;
+  /** Owned original encoded bytes; optional custom loaders otherwise fall back to PNG. */
+  sourceBlob?: Blob;
 }
 export type ImageEditorImageLoader = (
   url: string,
@@ -96,6 +90,8 @@ export interface ImageEditorInstance {
   /** Exports pixels without selection/UI chrome. Pending crop and text edits are committed first. */
   getImage(options?: ImageExportOptions): string | null;
   getBlob(options?: ImageExportOptions): Promise<Blob>;
+  /** Independent, validated output settings, suitable for persistence alongside the document. */
+  getExportOptions(): ImageExportOptions;
   /** Independent JSON-safe editable state; the host owns the original image source separately. */
   getDocument(): ImageDocument | null;
   /** Restores state against the currently loaded original image; failure preserves the draft. */
@@ -104,6 +100,8 @@ export interface ImageEditorInstance {
   addImage(url: string): Promise<void>;
   /** Original loaded pixels for thumbnails and comparison. */
   getSource(): CanvasImageSource | null;
+  /** Original encoded source, independent of crop, layers and output settings. */
+  getSourceBlob(): Promise<Blob>;
   /** Restore the original document as one undoable edit, without reloading the source. */
   revert(): void;
   hasChanges(): boolean;

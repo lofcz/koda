@@ -1,0 +1,22 @@
+/** Serializable document validation and geometry, safe in browsers and servers. */
+export { parseExportOptions, resolveExportSize } from './exportOptions';
+export type { ImageExportOptions } from './exportOptions';
+export {
+  createDocument,
+  parseDocument,
+  DEFAULT_EFFECTS,
+  DEFAULT_FRAME,
+  MAX_DIMENSION,
+  MAX_PIXELS,
+} from './model';
+export type {
+  ImageDocument,
+  Layer,
+  Effects,
+  Frame,
+  Matrix,
+  Point,
+  Rect,
+  LineEnd,
+  ShapeKind,
+} from './model';

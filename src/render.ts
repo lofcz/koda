@@ -8,6 +8,7 @@ import {
   Point,
 } from './model';
 import type { ImageExportOptions } from './types';
+import { resolveExportSize } from './exportOptions';
 
 export type ImageAssets = ReadonlyMap<string, CanvasImageSource>;
 const EMPTY_ASSETS: ImageAssets = new Map();
@@ -127,8 +128,10 @@ export function renderLayer(
     ? 'destination-out'
     : 'source-over';
   ctx.lineWidth = layer.strokeWidth;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
+  ctx.lineCap = layer.strokeCap ?? 'round';
+  ctx.lineJoin = layer.strokeJoin ?? 'round';
+  ctx.setLineDash([...(layer.strokeDash ?? [])]);
+  if (layer.feather) ctx.filter = `blur(${layer.feather}px)`;
   ctx.strokeStyle = layer.color;
   ctx.fillStyle = layer.fill;
   if (layer.kind === 'image') {
@@ -137,6 +140,8 @@ export function renderLayer(
   } else if (layer.kind === 'redaction') {
     redact(ctx, layer, backdrop);
   } else if (layer.kind === 'text') {
+    if (layer.fill !== 'transparent')
+      ctx.fillRect(0, 0, layer.width, layer.height);
     const size = layer.fontSize ?? 40;
     ctx.font = `${layer.italic ? 'italic ' : ''}${layer.bold ? 'bold ' : ''}${size}px ${layer.fontFamily ?? 'sans-serif'}`;
     ctx.textBaseline = 'top';
@@ -151,7 +156,30 @@ export function renderLayer(
       lineHeight = layer.lineHeight ?? 1.2;
     (layer.text ?? '').split('\n').forEach((line, i) => {
       const y = i * size * lineHeight;
+      const shadow = layer.textShadow;
+      if (shadow) {
+        ctx.shadowColor = shadow.color;
+        ctx.shadowBlur =
+          shadow.blur *
+          Math.sqrt(
+            Math.abs(
+              layer.matrix[0] * layer.matrix[3] -
+                layer.matrix[1] * layer.matrix[2]
+            )
+          );
+        ctx.shadowOffsetX =
+          layer.matrix[0] * shadow.offsetX + layer.matrix[2] * shadow.offsetY;
+        ctx.shadowOffsetY =
+          layer.matrix[1] * shadow.offsetX + layer.matrix[3] * shadow.offsetY;
+      }
+      if (layer.textOutline?.width) {
+        ctx.lineWidth = layer.textOutline.width * 2;
+        ctx.strokeStyle = layer.textOutline.color;
+        ctx.strokeText(line, x, y);
+        ctx.shadowColor = 'transparent';
+      }
       ctx.fillText(line, x, y);
+      ctx.shadowColor = 'transparent';
       if (layer.underline && line) {
         const width = ctx.measureText(line).width,
           left =
@@ -174,6 +202,7 @@ export function renderLayer(
       if (points.length === 1) {
         ctx.lineTo(points[0].x + 0.01, points[0].y + 0.01);
       }
+      if (layer.pathClosed) ctx.closePath();
     } else if (layer.kind === 'ellipse')
       ctx.ellipse(
         layer.width / 2,
@@ -185,7 +214,14 @@ export function renderLayer(
         Math.PI * 2
       );
     else if (layer.kind === 'rectangle')
-      ctx.rect(0, 0, layer.width, layer.height);
+      roundedRect(
+        ctx,
+        0,
+        0,
+        layer.width,
+        layer.height,
+        layer.cornerRadius ?? 0
+      );
     else if (layer.kind === 'triangle') {
       ctx.moveTo(layer.width / 2, 0);
       ctx.lineTo(layer.width, layer.height);
@@ -197,7 +233,8 @@ export function renderLayer(
     }
     if (
       layer.fill !== 'transparent' &&
-      !['path', 'line', 'arrow'].includes(layer.kind)
+      (!['path', 'line', 'arrow'].includes(layer.kind) ||
+        (layer.kind === 'path' && layer.pathClosed))
     )
       ctx.fill();
     if (layer.strokeWidth > 0) ctx.stroke();
@@ -680,17 +717,7 @@ export function exportCanvas(
   options: ImageExportOptions = {},
   assets: ImageAssets = EMPTY_ASSETS
 ): HTMLCanvasElement {
-  const width =
-      options.width ??
-      (options.height === undefined
-        ? doc.width
-        : (doc.width * options.height) / doc.height),
-    height =
-      options.height ??
-      (options.width === undefined
-        ? doc.height
-        : (doc.height * options.width) / doc.width),
-    size = dimensions(width, height),
+  const size = resolveExportSize(doc, options),
     { canvas, ctx } = surface(size.width, size.height),
     background =
       options.background ??
@@ -699,9 +726,47 @@ export function exportCanvas(
     ctx.fillStyle = background;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
-  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingEnabled = options.resampling !== 'pixelated';
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(compose(doc, image, assets), 0, 0, canvas.width, canvas.height);
+  let source = compose(doc, image, assets),
+    rect = size.sourceRect;
+  // Repeated halving prevents single-pass downsampling from dropping thin detail.
+  if (options.resampling !== 'pixelated') {
+    while (rect.width > canvas.width * 2 || rect.height > canvas.height * 2) {
+      const step = surface(
+        Math.min(rect.width, Math.max(canvas.width, Math.ceil(rect.width / 2))),
+        Math.min(
+          rect.height,
+          Math.max(canvas.height, Math.ceil(rect.height / 2))
+        )
+      );
+      step.ctx.imageSmoothingQuality = 'high';
+      step.ctx.drawImage(
+        source,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        0,
+        0,
+        step.canvas.width,
+        step.canvas.height
+      );
+      source = step.canvas;
+      rect = { x: 0, y: 0, width: source.width, height: source.height };
+    }
+  }
+  ctx.drawImage(
+    source,
+    rect.x,
+    rect.y,
+    rect.width,
+    rect.height,
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  );
   return canvas;
 }
 export function textSize(

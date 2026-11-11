@@ -1,6 +1,6 @@
 {
   "name": "@lofcz/react-image-editor",
-  "version": "2.0.0-rc.1",
+  "version": "2.0.0-rc.2",
   "description": "A fully local React image editor with an editable Canvas2D document, layers and history",
   "type": "commonjs",
   "main": "./dist/index.js",
@@ -15,6 +15,16 @@
       "require": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
+      }
+    },
+    "./document": {
+      "import": {
+        "types": "./dist/document.d.mts",
+        "default": "./dist/document.mjs"
+      },
+      "require": {
+        "types": "./dist/document.d.ts",
+        "default": "./dist/document.js"
       }
     },
     "./package.json": "./package.json"
@@ -44,7 +54,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:browser": "node test/browser.mjs && node test/core-browser.mjs && node test/browser-interactions.mjs && node test/browser-ui.mjs",
+    "test:package": "node test/document-module.mjs",
+    "test:browser": "node test/browser.mjs && node test/core-browser.mjs && node test/browser-interactions.mjs && node test/browser-ui.mjs && node test/browser-path-selection.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",

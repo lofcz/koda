@@ -5,6 +5,7 @@ import React, {
   useId,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -13,6 +14,7 @@ import {
   DEFAULT_EFFECTS,
   hitDocument,
   ImageDocument,
+  inverse,
   Layer,
   layerCorners,
   multiply,
@@ -31,12 +33,21 @@ import {
   cropHandles,
   distance,
   dragCrop,
+  duplicateLayers,
   lineEndpoints,
   midpoint,
   moveLineEndpoint,
+  marqueeLayers,
+  pathNodes,
+  pathSegments,
+  rectFromPoints,
   resizeCursor,
   SnapGuide,
   snapMove,
+  selectionFrame,
+  snapPathPoint,
+  transformLayers,
+  withPathPoints,
 } from './interactions';
 import { fitView, paintDocument, textSize, View, zoomAt } from './render';
 import type { EditorTool } from './types';
@@ -47,11 +58,22 @@ export interface SurfaceActions {
   actualSize(): void;
   cancel(): void;
   editText(id: string): void;
+  editPath(id: string): void;
+  finishPath(closed?: boolean): void;
+  deletePathPoint(): void;
 }
+export type PathState = {
+  drawing: boolean;
+  editing: boolean;
+  canFinish: boolean;
+  canClose: boolean;
+  canRemovePoint: boolean;
+};
 type Props = {
   engine: CanvasEngine;
   doc: ImageDocument;
   selected: string | null;
+  selectedIds?: readonly string[];
   tool: EditorTool;
   brush: {
     color: string;
@@ -63,7 +85,7 @@ type Props = {
   cropRatio: number | null;
   compare?: boolean;
   snap?: boolean;
-  shape?: ShapeKind | null;
+  shape?: ShapeKind | 'path' | null;
   redaction?: { mode: 'pixelate' | 'blur' | 'solid'; size: number };
   onViewChange?(view: { zoom: number; fitted: boolean }): void;
   onCropApply?(): void;
@@ -71,6 +93,7 @@ type Props = {
   onImportImage?(file: File): void;
   onCrop(rect: Rect): void;
   onText(id: string): void;
+  onPathStateChange?(state: PathState): void;
   t(key: string): string;
 };
 type Gesture =
@@ -78,14 +101,23 @@ type Gesture =
   | { type: 'draw'; base: ImageDocument; points: Point[]; id: string }
   | { type: 'create'; base: ImageDocument; start: Point; layer: Layer }
   | {
-      type: 'move' | 'resize' | 'rotate' | 'endpoint';
+      type: 'move' | 'resize' | 'rotate' | 'endpoint' | 'node';
       base: ImageDocument;
       layer: Layer;
       start: Point;
       corner: number;
+      ids?: readonly string[];
     }
+  | { type: 'marquee'; start: Point; ids: readonly string[]; additive: boolean }
+  | { type: 'path-tap' }
   | { type: 'crop'; start: Point; rect: Rect; mode: CropMode }
   | { type: 'pinch'; view: View; center: Point; distance: number };
+type PathDraft = {
+  base: ImageDocument;
+  points: Point[];
+  id: string;
+  style: Partial<Layer>;
+};
 const screen = (p: Point, v: View): Point => ({
   x: v.x + p.x * v.zoom,
   y: v.y + p.y * v.zoom,
@@ -126,6 +158,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       engine,
       doc,
       selected,
+      selectedIds,
       tool,
       brush,
       crop,
@@ -140,6 +173,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       onImportImage,
       onCrop,
       onText,
+      onPathStateChange,
       t,
     },
     ref
@@ -162,7 +196,22 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       [cursor, setCursor] = useState('default'),
       [dragOver, setDragOver] = useState(false),
       [hover, setHover] = useState<string | null>(null),
-      [brushPoint, setBrushPoint] = useState<Point | null>(null);
+      [brushPoint, setBrushPoint] = useState<Point | null>(null),
+      [marquee, setMarquee] = useState<Rect | null>(null),
+      [pathDraft, setPathDraft] = useState<PathDraft | null>(null),
+      [pathHover, setPathHover] = useState<Point | null>(null),
+      [editingPath, setEditingPath] = useState<string | null>(null),
+      [nodeIndex, setNodeIndex] = useState<number | null>(null);
+    const pathDraftRef = useRef<PathDraft | null>(null);
+    const engineSelection = engine.getSnapshot().selectedIds;
+    const selection = useMemo(
+      () => selectedIds ?? engineSelection,
+      [selectedIds, engineSelection]
+    );
+    const group = useMemo(
+      () => (selection.length > 1 ? selectionFrame(doc, selection) : null),
+      [doc, selection]
+    );
     const image = engine.image?.source,
       instructionsId = useId();
     const updateView = useCallback((next: View, isFit = false) => {
@@ -259,14 +308,146 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       },
       [engine]
     );
+    const previewPath = useCallback(
+      (draft: PathDraft) => {
+        pathDraftRef.current = draft;
+        setPathDraft(draft);
+        engine.preview({
+          ...draft.base,
+          layers: [
+            ...draft.base.layers,
+            pathLayer(draft.points, {
+              ...draft.style,
+              id: draft.id,
+              pathEditable: true,
+            }),
+          ],
+        });
+      },
+      [engine]
+    );
+    const finishPath = useCallback(
+      (closed = false) => {
+        const draft = pathDraftRef.current;
+        if (!draft) return;
+        pathDraftRef.current = null;
+        setPathDraft(null);
+        setPathHover(null);
+        if (draft.points.length < 2 || (closed && draft.points.length < 3)) {
+          engine.cancel();
+          return;
+        }
+        engine.preview({
+          ...draft.base,
+          layers: [
+            ...draft.base.layers,
+            pathLayer(draft.points, {
+              ...draft.style,
+              id: draft.id,
+              pathEditable: true,
+              pathClosed: closed,
+            }),
+          ],
+        });
+        engine.end();
+        engine.select(draft.id);
+        setEditingPath(draft.id);
+        setNodeIndex(null);
+      },
+      [engine]
+    );
+    const editPath = useCallback(
+      (id: string) => {
+        finishText();
+        finishPath();
+        const layer = engine
+          .getSnapshot()
+          .document?.layers.find((item) => item.id === id);
+        if (
+          !layer ||
+          layer.kind !== 'path' ||
+          !layer.pathEditable ||
+          layer.locked ||
+          layer.hidden
+        )
+          return;
+        engine.select(id);
+        setEditingPath((current) => (current === id ? null : id));
+        setNodeIndex(null);
+        host.current?.focus({ preventScroll: true });
+      },
+      [engine, finishPath, finishText]
+    );
+    const deletePathPoint = useCallback(() => {
+      const current = engine.getSnapshot().document,
+        layer = current?.layers.find((item) => item.id === editingPath);
+      if (
+        !current ||
+        !layer ||
+        nodeIndex === null ||
+        (layer.points?.length ?? 0) <= (layer.pathClosed ? 3 : 2)
+      )
+        return;
+      engine.commit(
+        updateLayer(
+          current,
+          layer.id,
+          withPathPoints(
+            layer,
+            layer.points!.filter((_, index) => index !== nodeIndex)
+          )
+        )
+      );
+      setNodeIndex(null);
+    }, [engine, editingPath, nodeIndex]);
+    useEffect(() => {
+      const layer = doc.layers.find((item) => item.id === editingPath);
+      onPathStateChange?.({
+        drawing: !!pathDraft,
+        editing: !!layer,
+        canFinish: (pathDraft?.points.length ?? 0) >= 2,
+        canClose: (pathDraft?.points.length ?? 0) >= 3,
+        canRemovePoint:
+          !!layer &&
+          nodeIndex !== null &&
+          (layer.points?.length ?? 0) > (layer.pathClosed ? 3 : 2),
+      });
+    }, [doc.layers, editingPath, nodeIndex, pathDraft, onPathStateChange]);
+    useEffect(() => {
+      if (
+        editingPath &&
+        (selection.length !== 1 ||
+          selection[0] !== editingPath ||
+          !doc.layers.some((layer) => layer.id === editingPath))
+      ) {
+        setEditingPath(null);
+        setNodeIndex(null);
+      }
+      const path = doc.layers.find((layer) => layer.id === editingPath);
+      if (nodeIndex !== null && nodeIndex >= (path?.points?.length ?? 0))
+        setNodeIndex(null);
+      if (
+        pathDraftRef.current &&
+        !doc.layers.some((layer) => layer.id === pathDraftRef.current!.id)
+      ) {
+        pathDraftRef.current = null;
+        setPathDraft(null);
+        setPathHover(null);
+      }
+    }, [doc.layers, editingPath, nodeIndex, selection]);
     const cancel = useCallback(() => {
       const current = gesture.current;
       if (current?.type === 'crop') onCrop(current.rect);
+      if (current?.type === 'marquee') engine.selectMany(current.ids);
       if (current?.type === 'pan' || current?.type === 'pinch')
         updateView(current.view);
       gesture.current = null;
       pointers.current.clear();
       keyboardTransaction.current = false;
+      pathDraftRef.current = null;
+      setPathDraft(null);
+      setPathHover(null);
+      setMarquee(null);
       finishText(true);
       engine.cancel();
       setGuides([]);
@@ -274,6 +455,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     }, [engine, finishText, onCrop, updateView]);
     const beginText = useCallback(
       (id: string) => {
+        finishPath();
         finishText();
         const current = engine.getSnapshot().document,
           layer = current?.layers.find((item) => item.id === id);
@@ -284,7 +466,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         setEditing(id);
         onText(id);
       },
-      [engine, finishText, onText]
+      [engine, finishPath, finishText, onText]
     );
     useEffect(() => {
       if (editing) {
@@ -307,6 +489,9 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         fit,
         cancel,
         editText: beginText,
+        editPath,
+        finishPath,
+        deletePathPoint,
         actualSize: () =>
           updateView(
             zoomAt(viewRef.current, 1, {
@@ -322,25 +507,62 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             })
           ),
       }),
-      [fit, cancel, beginText, size, updateView]
+      [
+        fit,
+        cancel,
+        beginText,
+        editPath,
+        finishPath,
+        deletePathPoint,
+        size,
+        updateView,
+      ]
     );
     useEffect(() => () => engine.cancel(), [engine]);
-    const previousMode = useRef({ image, tool, compare });
+    useEffect(
+      () =>
+        engine.subscribeChanges(() => {
+          // Exports, restores and history commands can commit while a pointer is captured.
+          // The document now owns that result; an old gesture must never replay its base.
+          if (gesture.current) {
+            gesture.current = null;
+            pointers.current.clear();
+            setGuides([]);
+            setMarquee(null);
+          }
+          if (pathDraftRef.current) {
+            pathDraftRef.current = null;
+            setPathDraft(null);
+            setPathHover(null);
+          }
+          keyboardTransaction.current = false;
+        }),
+      [engine]
+    );
+    const previousMode = useRef({ image, tool, compare, shape });
     useEffect(() => {
       const previous = previousMode.current;
       if (
         previous.image !== image ||
         previous.tool !== tool ||
-        previous.compare !== compare
+        previous.compare !== compare ||
+        previous.shape !== shape
       ) {
         if (gesture.current) cancel();
+        if (previous.image !== image) {
+          pathDraftRef.current = null;
+          setPathDraft(null);
+          setPathHover(null);
+        } else finishPath();
+        setEditingPath(null);
+        setNodeIndex(null);
         if (previous.image !== image) finishText(true);
         setGuides([]);
         setHover(null);
         setBrushPoint(null);
       }
-      previousMode.current = { image, tool, compare };
-    }, [image, tool, compare, cancel, finishText]);
+      previousMode.current = { image, tool, compare, shape };
+    }, [image, tool, compare, shape, cancel, finishText, finishPath]);
     useEffect(() => {
       const reset = () => {
         space.current = false;
@@ -486,7 +708,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         ui.fillText(label, labelX + 9, labelY + 12);
       } else if (!editing) {
         const hovered = doc.layers.find(
-          (item) => item.id === hover && item.id !== selected
+          (item) => item.id === hover && !selection.includes(item.id)
         );
         if (hovered && !gesture.current) {
           ui.strokeStyle = accent;
@@ -498,12 +720,45 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           ui.setLineDash([]);
           ui.globalAlpha = 1;
         }
-        const layer = doc.layers.find((item) => item.id === selected);
+        if (group) {
+          ui.strokeStyle = accent;
+          ui.lineWidth = 1;
+          ui.globalAlpha = 0.55;
+          for (const item of doc.layers.filter((item) =>
+            selection.includes(item.id)
+          )) {
+            path(layerCorners(item).map((p) => screen(p, view)));
+            ui.stroke();
+          }
+          ui.globalAlpha = 1;
+        }
+        const layer = group ?? doc.layers.find((item) => item.id === selected);
         if (layer && !layer.hidden) {
           const corners = layerCorners(layer).map((p) => screen(p, view));
           ui.strokeStyle = accent;
           ui.lineWidth = 1.5;
-          if (layer.kind === 'line' || layer.kind === 'arrow') {
+          if (layer.id === editingPath && layer.kind === 'path') {
+            const nodes = pathNodes(layer).map((point) => screen(point, view));
+            ui.setLineDash([4, 3]);
+            path(nodes, !!layer.pathClosed);
+            ui.stroke();
+            ui.setLineDash([]);
+            for (const item of pathSegments(layer)) {
+              const p = screen(item.point, view);
+              ui.fillStyle = '#fff';
+              ui.fillRect(p.x - 3, p.y - 3, 6, 6);
+              ui.strokeRect(p.x - 3, p.y - 3, 6, 6);
+            }
+            nodes.forEach((point, index) => {
+              handle(point, index === nodeIndex ? 7 : 5);
+              if (index === nodeIndex) {
+                ui.fillStyle = accent;
+                ui.beginPath();
+                ui.arc(point.x, point.y, 3, 0, Math.PI * 2);
+                ui.fill();
+              }
+            });
+          } else if (layer.kind === 'line' || layer.kind === 'arrow') {
             const ends = lineEndpoints(layer).map((p) => screen(p, view));
             path(ends, false);
             ui.stroke();
@@ -521,6 +776,38 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             }
           }
         }
+      }
+      if (pathDraft) {
+        const points = pathDraft.points.map((point) => screen(point, view));
+        ui.strokeStyle = accent;
+        ui.lineWidth = 1.5;
+        if (pathHover) {
+          ui.setLineDash([4, 3]);
+          path([points[points.length - 1], screen(pathHover, view)], false);
+          ui.stroke();
+          ui.setLineDash([]);
+        }
+        points.forEach((point, index) => handle(point, index === 0 ? 6 : 4));
+      }
+      if (marquee) {
+        const p = screen(marquee, view);
+        ui.fillStyle = accent;
+        ui.globalAlpha = 0.12;
+        ui.fillRect(
+          p.x,
+          p.y,
+          marquee.width * view.zoom,
+          marquee.height * view.zoom
+        );
+        ui.globalAlpha = 1;
+        ui.strokeStyle = accent;
+        ui.lineWidth = 1;
+        ui.strokeRect(
+          p.x,
+          p.y,
+          marquee.width * view.zoom,
+          marquee.height * view.zoom
+        );
       }
       ui.strokeStyle = '#e762a1';
       ui.lineWidth = 1;
@@ -566,6 +853,8 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       view,
       size,
       selected,
+      selection,
+      group,
       tool,
       crop,
       guides,
@@ -574,6 +863,11 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       hover,
       brushPoint,
       brush.size,
+      marquee,
+      pathDraft,
+      pathHover,
+      editingPath,
+      nodeIndex,
     ]);
 
     const position = (event: { clientX: number; clientY: number }): Point => {
@@ -602,10 +896,12 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       );
     };
     const selectedHandle = (p: Point, touch = false) => {
-      const layer = doc.layers.find(
-        (item) => item.id === selected && !item.locked && !item.hidden
-      );
-      if (!layer || tool === 'draw') return null;
+      const layer =
+        group ??
+        doc.layers.find(
+          (item) => item.id === selected && !item.locked && !item.hidden
+        );
+      if (!layer || tool === 'draw' || editingPath === layer.id) return null;
       if (layer.kind === 'line' || layer.kind === 'arrow') {
         const endpoint = lineEndpoints(layer).findIndex(
           (point) =>
@@ -618,6 +914,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
               type: 'endpoint' as const,
               corner: endpoint,
               cursor: 'crosshair',
+              ids: group ? selection : undefined,
             };
       }
       const corners = layerCorners(layer).map((point) =>
@@ -632,10 +929,87 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           type: 'resize' as const,
           corner,
           cursor: resizeCursor(corners, corner),
+          ids: group ? selection : undefined,
         };
       if (distance(rotationHandle(corners), p) <= (touch ? 22 : 12))
-        return { layer, type: 'rotate' as const, corner: -1, cursor: 'grab' };
+        return {
+          layer,
+          type: 'rotate' as const,
+          corner: -1,
+          cursor: 'grab',
+          ids: group ? selection : undefined,
+        };
       return null;
+    };
+    const pathHandle = (p: Point, touch = false) => {
+      const layer = doc.layers.find(
+        (item) =>
+          item.id === editingPath &&
+          item.pathEditable &&
+          !item.locked &&
+          !item.hidden
+      );
+      if (!layer) return null;
+      const index = pathNodes(layer).findIndex(
+        (point) =>
+          distance(screen(point, viewRef.current), p) <= (touch ? 22 : 10)
+      );
+      if (index >= 0)
+        return { layer, index, insert: false, point: pathNodes(layer)[index] };
+      const segment = pathSegments(layer).find(
+        (item) =>
+          distance(screen(item.point, viewRef.current), p) <= (touch ? 16 : 8)
+      );
+      return segment
+        ? { layer, index: segment.index, insert: true, point: segment.point }
+        : null;
+    };
+    const addPathPoint = (point: Point, shift: boolean, touch: boolean) => {
+      const draft = pathDraftRef.current;
+      if (draft) {
+        const threshold = (touch ? 22 : 10) / viewRef.current.zoom;
+        if (
+          draft.points.length >= 3 &&
+          distance(point, draft.points[0]) <= threshold
+        ) {
+          finishPath(true);
+          return;
+        }
+        if (
+          draft.points.length >= 2 &&
+          distance(point, draft.points[draft.points.length - 1]) <= threshold
+        ) {
+          finishPath();
+          return;
+        }
+        const next = shift
+          ? snapPathPoint(draft.points[draft.points.length - 1], point)
+          : point;
+        if (
+          distance(next, draft.points[draft.points.length - 1]) <
+          1 / viewRef.current.zoom
+        )
+          return;
+        previewPath({ ...draft, points: [...draft.points, next] });
+      } else {
+        setEditingPath(null);
+        setNodeIndex(null);
+        engine.select(null);
+        engine.begin();
+        previewPath({
+          base: doc,
+          id: crypto.randomUUID(),
+          points: [point],
+          style: {
+            color: brush.color,
+            strokeWidth: Math.max(2, doc.width / 200),
+            fill: 'transparent',
+            opacity: brush.opacity ?? 1,
+            pathClosed: false,
+          },
+        });
+      }
+      setPathHover(null);
     };
     const stroke = (g: Extract<Gesture, { type: 'draw' }>) =>
       pathLayer(g.points, {
@@ -657,6 +1031,12 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       pointers.current.set(event.pointerId, p);
       if (pointers.current.size === 2) {
         if (gesture.current?.type === 'crop') onCrop(gesture.current.rect);
+        if (gesture.current?.type === 'marquee')
+          engine.selectMany(gesture.current.ids);
+        pathDraftRef.current = null;
+        setPathDraft(null);
+        setPathHover(null);
+        setMarquee(null);
         engine.cancel();
         setGuides([]);
         const [a, b] = [...pointers.current.values()];
@@ -681,6 +1061,36 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         setCursor(cropCursor(mode));
         return;
       }
+      if (pathDraftRef.current) {
+        addPathPoint(q, event.shiftKey, event.pointerType === 'touch');
+        gesture.current = { type: 'path-tap' };
+        return;
+      }
+      const node = pathHandle(p, event.pointerType === 'touch');
+      if (node) {
+        engine.begin();
+        let layer = node.layer;
+        if (node.insert) {
+          const points = [...(layer.points ?? [])];
+          points.splice(
+            node.index,
+            0,
+            transform(inverse(layer.matrix), node.point)
+          );
+          layer = withPathPoints(layer, points);
+          engine.preview(updateLayer(doc, layer.id, layer));
+        }
+        setNodeIndex(node.index);
+        gesture.current = {
+          type: 'node',
+          base: doc,
+          layer,
+          start: q,
+          corner: node.index,
+        };
+        setCursor('move');
+        return;
+      }
       const handle = selectedHandle(p, event.pointerType === 'touch');
       if (handle) {
         engine.begin();
@@ -690,6 +1100,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           layer: handle.layer,
           start: q,
           corner: handle.corner,
+          ids: handle.ids,
         };
         setCursor(handle.type === 'rotate' ? 'grabbing' : handle.cursor);
         return;
@@ -710,21 +1121,36 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         q,
         (event.pointerType === 'touch' ? 10 : 5) / viewRef.current.zoom
       );
-      engine.select(hit?.id ?? null);
       if (hit && !hit.locked) {
+        let ids = selection;
+        if (event.shiftKey) {
+          engine.toggleSelection(hit.id);
+          ids = engine.getSnapshot().selectedIds;
+          if (!ids.includes(hit.id)) return;
+        } else if (!ids.includes(hit.id)) {
+          engine.select(hit.id);
+          ids = [hit.id];
+        }
+        const frame = ids.length > 1 ? selectionFrame(doc, ids) : null;
         engine.begin();
         gesture.current = {
           type: 'move',
           base: doc,
-          layer: hit,
+          layer: frame ?? hit,
           start: q,
           corner: 0,
+          ids: frame ? ids : undefined,
         };
         setCursor('move');
+      } else if (tool === 'shapes' && shape === 'path' && inside(q)) {
+        addPathPoint(q, event.shiftKey, event.pointerType === 'touch');
+        gesture.current = { type: 'path-tap' };
+        setCursor('crosshair');
       } else if (
         inside(q) &&
         ((tool === 'shapes' && shape) || tool === 'redact')
       ) {
+        engine.select(null);
         const kind = tool === 'redact' ? 'redaction' : shape!;
         const layer: Layer = {
           id: crypto.randomUUID(),
@@ -747,7 +1173,38 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         engine.begin();
         gesture.current = { type: 'create', base: doc, start: q, layer };
         setCursor('crosshair');
+      } else if (tool === 'select' && !event.altKey) {
+        if (
+          group &&
+          !event.shiftKey &&
+          q.x >= group.matrix[4] &&
+          q.y >= group.matrix[5] &&
+          q.x <= group.matrix[4] + group.width &&
+          q.y <= group.matrix[5] + group.height
+        ) {
+          engine.begin();
+          gesture.current = {
+            type: 'move',
+            base: doc,
+            layer: group,
+            start: q,
+            corner: 0,
+            ids: selection,
+          };
+          setCursor('move');
+        } else {
+          gesture.current = {
+            type: 'marquee',
+            start: q,
+            ids: selection,
+            additive: event.shiftKey,
+          };
+          if (!event.shiftKey) engine.select(null);
+          setMarquee({ ...q, width: 0, height: 0 });
+          setCursor('crosshair');
+        }
       } else {
+        engine.select(null);
         gesture.current = { type: 'pan', start: p, view: viewRef.current };
         setCursor('grabbing');
       }
@@ -756,6 +1213,18 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       const p = position(event),
         q = imagePoint(p),
         g = gesture.current;
+      if (pathDraftRef.current) {
+        const points = pathDraftRef.current.points;
+        setPathHover(
+          event.shiftKey ? snapPathPoint(points[points.length - 1], q) : q
+        );
+        setCursor('crosshair');
+        if (!g || g.type === 'path-tap') {
+          if (pointers.current.has(event.pointerId))
+            pointers.current.set(event.pointerId, p);
+          return;
+        }
+      }
       if (tool === 'draw' && event.pointerType !== 'touch') setBrushPoint(p);
       if (!g || !pointers.current.has(event.pointerId)) {
         if (compare) return;
@@ -764,10 +1233,11 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         else if (tool === 'draw') setCursor('crosshair');
         else {
           const handle = selectedHandle(p),
+            node = pathHandle(p),
             hit = hitDocument(doc, q, 5 / viewRef.current.zoom);
           setHover(hit?.id ?? null);
           setCursor(
-            handle?.cursor ??
+            (node ? (node.insert ? 'copy' : 'move') : handle?.cursor) ??
               (hit
                 ? hit.locked
                   ? 'default'
@@ -780,6 +1250,14 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         return;
       }
       pointers.current.set(event.pointerId, p);
+      if (g.type === 'path-tap') return;
+      if (g.type === 'marquee') {
+        const rect = rectFromPoints(g.start, q),
+          ids = marqueeLayers(doc, rect);
+        setMarquee(rect);
+        engine.selectMany(g.additive ? [...new Set([...g.ids, ...ids])] : ids);
+        return;
+      }
       if (g.type === 'pinch') {
         if (pointers.current.size < 2) return;
         const [a, b] = [...pointers.current.values()],
@@ -866,6 +1344,20 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         );
         return;
       }
+      if (g.type === 'node') {
+        const points = [...(g.layer.points ?? [])];
+        let point = q;
+        if (event.shiftKey && points.length > 1) {
+          const previous =
+            points[(g.corner + points.length - 1) % points.length];
+          point = snapPathPoint(transform(g.layer.matrix, previous), q);
+        }
+        points[g.corner] = transform(inverse(g.layer.matrix), point);
+        engine.preview(
+          updateLayer(g.base, g.layer.id, withPathPoints(g.layer, points))
+        );
+        return;
+      }
       let next = g.layer;
       if (g.type === 'move') {
         let delta = { x: q.x - g.start.x, y: q.y - g.start.y };
@@ -878,7 +1370,14 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         if (axis === 'y') delta.x = 0;
         const snapped =
           snap && !event.altKey
-            ? snapMove(g.base, g.layer, delta, 5 / viewRef.current.zoom, axis)
+            ? snapMove(
+                g.base,
+                g.layer,
+                delta,
+                5 / viewRef.current.zoom,
+                axis,
+                g.ids
+              )
             : { delta, guides: [] };
         delta = snapped.delta;
         setGuides(snapped.guides);
@@ -917,14 +1416,26 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         }
         next = rotateLayer(g.layer, angle);
       }
-      engine.preview(updateLayer(g.base, g.layer.id, next));
+      engine.preview(
+        g.ids
+          ? transformLayers(
+              g.base,
+              g.ids,
+              multiply(next.matrix, inverse(g.layer.matrix))
+            )
+          : updateLayer(g.base, g.layer.id, next)
+      );
     };
     const up = (event: React.PointerEvent<HTMLCanvasElement>) => {
       if (!pointers.current.has(event.pointerId)) return;
       const g = gesture.current;
       if (g?.type === 'draw' && g.points.length === 1)
         engine.preview({ ...g.base, layers: [...g.base.layers, stroke(g)] });
-      if (g && !['pan', 'pinch', 'crop'].includes(g.type)) engine.end();
+      if (
+        g &&
+        !['pan', 'pinch', 'crop', 'marquee', 'path-tap'].includes(g.type)
+      )
+        engine.end();
       if (
         g?.type === 'create' &&
         engine
@@ -943,6 +1454,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             }
           : null;
       setGuides([]);
+      setMarquee(null);
       setCursor(
         space.current || gesture.current?.type === 'pan'
           ? 'grab'
@@ -956,7 +1468,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     const keyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (isTyping(event.target)) return;
       if (
-        gesture.current &&
+        (gesture.current || pathDraftRef.current) &&
         (event.ctrlKey || event.metaKey) &&
         ['z', 'y'].includes(event.key.toLowerCase())
       ) {
@@ -972,15 +1484,28 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         return;
       }
       if (event.key === 'Escape') {
-        const active = !!gesture.current;
+        const active = !!gesture.current || !!pathDraftRef.current;
         cancel();
         if (!active && tool === 'crop') onCropCancel?.();
-        else if (!active) engine.select(null);
+        else if (!active && editingPath) {
+          setEditingPath(null);
+          setNodeIndex(null);
+        } else if (!active) engine.select(null);
         event.preventDefault();
         event.stopPropagation();
         return;
       }
       if (compare) return;
+      const draft = pathDraftRef.current;
+      if (draft && ['Enter', 'Backspace', 'Delete'].includes(event.key)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.key === 'Enter')
+          finishPath(event.shiftKey && draft.points.length >= 3);
+        else if (draft.points.length <= 1) cancel();
+        else previewPath({ ...draft, points: draft.points.slice(0, -1) });
+        return;
+      }
       if (event.key === '0' && !event.ctrlKey && !event.metaKey) {
         fit();
         event.preventDefault();
@@ -1032,20 +1557,30 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       }
       const layer = doc.layers.find((item) => item.id === selected),
         command = event.ctrlKey || event.metaKey;
+      if (command && event.key.toLowerCase() === 'a') {
+        engine.selectMany(
+          doc.layers
+            .filter(
+              (item) =>
+                !item.hidden && !item.locked && !item.erase && item.opacity > 0
+            )
+            .map((item) => item.id)
+        );
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (command && event.key.toLowerCase() === 'd' && layer) {
-        const copy = {
-          ...layer,
-          id: crypto.randomUUID(),
-          matrix: multiply(translate(12, 12), layer.matrix),
-        };
-        engine.commit({ ...doc, layers: [...doc.layers, copy] });
-        engine.select(copy.id);
+        const copy = duplicateLayers(doc, selection);
+        engine.commit(copy.document);
+        engine.selectMany(copy.ids);
         event.preventDefault();
         event.stopPropagation();
         return;
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
-        if (!layer?.locked) engine.removeSelected();
+        if (editingPath && nodeIndex !== null) deletePathPoint();
+        else if (!layer?.locked) engine.removeSelected();
         event.preventDefault();
         return;
       }
@@ -1076,6 +1611,15 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         return;
       }
       if (
+        event.key === 'Enter' &&
+        layer?.kind === 'path' &&
+        layer.pathEditable
+      ) {
+        editPath(layer.id);
+        event.preventDefault();
+        return;
+      }
+      if (
         layer &&
         !layer.locked &&
         ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)
@@ -1086,6 +1630,51 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           keyboardTransaction.current = true;
         }
         const amount = event.shiftKey ? 10 : 1;
+        const delta = {
+          x:
+            event.key === 'ArrowLeft'
+              ? -amount
+              : event.key === 'ArrowRight'
+                ? amount
+                : 0,
+          y:
+            event.key === 'ArrowUp'
+              ? -amount
+              : event.key === 'ArrowDown'
+                ? amount
+                : 0,
+        };
+        if (
+          editingPath === layer.id &&
+          nodeIndex !== null &&
+          layer.points?.[nodeIndex]
+        ) {
+          const points = [...layer.points],
+            point = transform(layer.matrix, points[nodeIndex]);
+          points[nodeIndex] = transform(inverse(layer.matrix), {
+            x: point.x + delta.x,
+            y: point.y + delta.y,
+          });
+          engine.preview(
+            updateLayer(doc, layer.id, withPathPoints(layer, points))
+          );
+          return;
+        }
+        if (group) {
+          const matrix = event.altKey
+            ? multiply(
+                rotateLayer(
+                  group,
+                  (event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+                    ? -1
+                    : 1) * (event.shiftKey ? 15 : 1)
+                ).matrix,
+                inverse(group.matrix)
+              )
+            : translate(delta.x, delta.y);
+          engine.preview(transformLayers(doc, selection, matrix));
+          return;
+        }
         engine.preview(
           updateLayer(
             doc,
@@ -1211,12 +1800,18 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             }}
             onDoubleClick={(event) => {
               if (compare || tool === 'crop' || tool === 'draw') return;
+              if (pathDraftRef.current) {
+                finishPath();
+                return;
+              }
               const layer = hitDocument(
                 doc,
                 imagePoint(position(event)),
                 5 / viewRef.current.zoom
               );
               if (layer?.kind === 'text') beginText(layer.id);
+              else if (layer?.kind === 'path' && layer.pathEditable)
+                editPath(layer.id);
             }}
           />
           {editingLayer && !compare ? (

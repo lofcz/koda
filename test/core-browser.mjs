@@ -343,6 +343,219 @@ try {
       engine.getImage({ type: 'image/jpeg' }).startsWith('data:image/jpeg'),
       'Synchronous data URL respects requested encoding'
     );
+    const contained = await fromBlob(
+      await engine.getBlob({ width: 32, height: 32, fit: 'contain' })
+    );
+    equal(
+      [contained.width, contained.height],
+      [32, 24],
+      'Contain output preserves aspect inside bounds'
+    );
+    const covered = await fromBlob(
+      await engine.getBlob({
+        width: 128,
+        height: 128,
+        fit: 'cover',
+        upscale: false,
+      })
+    );
+    equal(
+      [covered.width, covered.height],
+      [48, 48],
+      'Cover without upscaling keeps source resolution'
+    );
+    const smooth = render.exportCanvas(original, patterned, {
+        width: 8,
+        height: 6,
+        resampling: 'high',
+      }),
+      sharp = render.exportCanvas(original, patterned, {
+        width: 8,
+        height: 6,
+        resampling: 'pixelated',
+      });
+    check(
+      pixel(smooth, 3, 3)[0] > 100 && pixel(smooth, 3, 3)[0] < 155,
+      'Downsampling retains average thin detail'
+    );
+    check(
+      [0, 255].includes(pixel(sharp, 3, 3)[0]),
+      'Pixelated resampling retains source pixels'
+    );
+
+    const blank = make(),
+      polygon = model.pathLayer(
+        [
+          { x: 8, y: 8 },
+          { x: 32, y: 8 },
+          { x: 8, y: 32 },
+        ],
+        {
+          pathClosed: true,
+          pathEditable: true,
+          fill: '#00ff00',
+          strokeWidth: 0,
+        }
+      );
+    canvas = render.exportCanvas({ ...original, layers: [polygon] }, blank);
+    equal(
+      pixel(canvas, 12, 12),
+      [0, 255, 0, 255],
+      'Closed editable polygon fills its interior'
+    );
+    equal(
+      pixel(canvas, 30, 30),
+      [0, 0, 0, 0],
+      'Polygon does not fill its bounding box'
+    );
+    const dashed = model.pathLayer(
+      [
+        { x: 8, y: 8 },
+        { x: 40, y: 8 },
+      ],
+      {
+        color: '#ff0000',
+        strokeWidth: 4,
+        strokeDash: [4, 4],
+        strokeCap: 'butt',
+      }
+    );
+    canvas = render.exportCanvas({ ...original, layers: [dashed] }, blank);
+    check(
+      pixel(canvas, 10, 8)[3] === 255 && pixel(canvas, 14, 8)[3] === 0,
+      'Dash pattern and butt caps render actual gaps'
+    );
+    canvas = render.exportCanvas(
+      { ...original, layers: [{ ...rectangle, cornerRadius: 8 }] },
+      blank
+    );
+    check(
+      pixel(canvas, 8, 8)[3] === 0 && pixel(canvas, 16, 10)[3] === 255,
+      'Rectangle corner radius clips shape corners'
+    );
+    const textLayer = {
+      ...rectangle,
+      kind: 'text',
+      text: 'Hi',
+      fontSize: 20,
+      width: 40,
+      height: 28,
+      fill: 'transparent',
+      color: '#ffffff',
+      textOutline: { color: '#000000', width: 2 },
+      textShadow: { color: '#ff0000', blur: 0, offsetX: 7, offsetY: 5 },
+    };
+    canvas = render.exportCanvas({ ...original, layers: [textLayer] }, blank);
+    const textPixels = canvas.getContext('2d').getImageData(0, 0, 64, 48).data;
+    let black = 0,
+      white = 0,
+      red = 0;
+    for (let i = 0; i < textPixels.length; i += 4) {
+      if (textPixels[i + 3] > 240) {
+        if (textPixels[i] === 0 && textPixels[i + 1] === 0) black++;
+        if (textPixels[i] === 255 && textPixels[i + 1] === 255) white++;
+        if (textPixels[i] === 255 && textPixels[i + 1] === 0) red++;
+      }
+    }
+    check(
+      black > 0 && white > 0 && red > 0,
+      'Text fill, outline and offset shadow have distinct pixels'
+    );
+    canvas = render.exportCanvas(
+      { ...original, layers: [{ ...textLayer, text: '', fill: '#00ffff' }] },
+      blank
+    );
+    equal(
+      pixel(canvas, 9, 9),
+      [0, 255, 255, 255],
+      'Text background fills the editable box'
+    );
+    canvas = render.exportCanvas(
+      { ...original, layers: [{ ...rectangle, feather: 3 }] },
+      blank
+    );
+    check(
+      pixel(canvas, 6, 16)[3] > 0 &&
+        pixel(canvas, 6, 16)[3] < pixel(canvas, 16, 16)[3],
+      'Shape feather creates a soft transparent edge'
+    );
+
+    const { exifFixture } = await import(`/@fs${root}/test/exif-fixture.ts`),
+      { readJpegExif } = await import(`/@fs${root}/src/jpegMetadata.ts`),
+      rawJpeg = new Uint8Array(
+        await (
+          await new Promise((resolve) =>
+            source.toBlob(resolve, 'image/jpeg', 0.95)
+          )
+        ).arrayBuffer()
+      ),
+      exif = exifFixture(6),
+      originalJpeg = new Uint8Array(rawJpeg.length + exif.length);
+    originalJpeg.set(rawJpeg.subarray(0, 2));
+    originalJpeg.set(exif, 2);
+    originalJpeg.set(rawJpeg.subarray(2), 2 + exif.length);
+    const jpegUrl = URL.createObjectURL(
+      new Blob([originalJpeg], { type: 'application/octet-stream' })
+    );
+    await engine.reset(jpegUrl);
+    URL.revokeObjectURL(jpegUrl);
+    equal(
+      [engine.getDocument().width, engine.getDocument().height],
+      [48, 64],
+      'EXIF orientation is applied once while decoding'
+    );
+    equal(
+      [...new Uint8Array(await (await engine.getSourceBlob()).arrayBuffer())],
+      [...originalJpeg],
+      'Original encoded bytes survive URL revocation'
+    );
+    const withExif = await engine.getBlob({ type: 'image/jpeg', width: 24 }),
+      outputExif = readJpegExif(new Uint8Array(await withExif.arrayBuffer())),
+      outputView = new DataView(outputExif.buffer);
+    equal(
+      [
+        outputView.getUint16(28, true),
+        outputView.getUint32(40, true),
+        outputView.getUint32(52, true),
+      ],
+      [1, 24, 32],
+      'JPEG output normalizes orientation and dimensions'
+    );
+    equal(
+      [...outputExif.slice(64, 68)],
+      [67, 65, 77, 0],
+      'JPEG export retains camera metadata'
+    );
+    check(
+      outputExif.slice(110).every((value) => value === 0),
+      'JPEG export removes embedded unedited thumbnail pixels'
+    );
+    equal(
+      [(await fromBlob(withExif)).width, (await fromBlob(withExif)).height],
+      [24, 32],
+      'Normalized JPEG metadata does not rotate output a second time'
+    );
+    check(
+      readJpegExif(
+        new Uint8Array(
+          await (
+            await engine.getBlob({ type: 'image/jpeg', metadata: 'strip' })
+          ).arrayBuffer()
+        )
+      ) === null,
+      'Metadata stripping is explicit and effective'
+    );
+    const syncExif = readJpegExif(
+      new Uint8Array(
+        await (
+          await fetch(engine.getImage({ type: 'image/jpeg' }))
+        ).arrayBuffer()
+      )
+    );
+    check(
+      new DataView(syncExif.buffer).getUint16(28, true) === 1,
+      'Synchronous JPEG export preserves normalized EXIF too'
+    );
     engine.destroy();
     return {
       photoEffects: true,
@@ -357,6 +570,11 @@ try {
       restoreUndoRedo: true,
       pngJpegWebp: true,
       outputSizing: true,
+      fitAndResampling: true,
+      polygonAndStrokeStyles: true,
+      textOutlineShadow: true,
+      originalSourceOwnership: true,
+      exifOrientationAndPrivacy: true,
     };
   }, root);
   assert.equal(result.previewExportMatch, true);

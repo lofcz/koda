@@ -1,3 +1,5 @@
+'use client';
+
 import { ImageEditor } from './ImageEditor';
 
 export * from './types';

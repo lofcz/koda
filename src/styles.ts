@@ -88,6 +88,15 @@ export const styles = `
 .image-editor-root .rie-options-heading h2{font-weight:650;letter-spacing:-.01em}
 .image-editor-root .rie-options-content{padding:8px 16px 18px;gap:16px;scrollbar-width:thin;scrollbar-color:var(--rie-line) transparent}
 .image-editor-root .rie-stack{gap:14px}
+.image-editor-root .rie-selection-count{margin:0;font-weight:600;color:var(--rie-fg)}
+.image-editor-root .rie-control-group{min-width:0;border:0;padding:0;margin:0}
+.image-editor-root .rie-control-group legend{font-size:11px;color:var(--rie-secondary);margin-bottom:6px}
+.image-editor-root .rie-alignment-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
+.image-editor-root .rie-alignment-grid .rie-icon-button{width:100%;min-height:36px;justify-content:center}
+.image-editor-root .rie-advanced{border-block:1px solid var(--rie-line);padding-block:4px}
+.image-editor-root .rie-advanced summary{padding:8px 0;cursor:pointer;font-weight:600;font-size:12px}
+.image-editor-root .rie-advanced summary:focus-visible{outline:2px solid var(--rie-accent);outline-offset:3px}
+.image-editor-root .rie-advanced>.rie-stack{padding:8px 0}
 .image-editor-root .rie-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 .image-editor-root .rie-grid>button{padding-inline:6px;font-size:11px;border-color:var(--rie-line);flex-wrap:wrap;min-height:42px}
 .image-editor-root .rie-label{gap:7px}

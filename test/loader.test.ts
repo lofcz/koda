@@ -16,23 +16,43 @@ class FakeImage {
 beforeEach(() => {
   FakeImage.instances = [];
   vi.stubGlobal('Image', FakeImage);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(['pixels'], { type: 'image/png' }),
+    }))
+  );
+  vi.stubGlobal('URL', {
+    createObjectURL: vi.fn(() => 'blob:owned-image'),
+    revokeObjectURL: vi.fn(),
+  });
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
     drawImage: vi.fn(),
     getImageData: () => ({ data: new Uint8ClampedArray(4) }),
   } as unknown as CanvasRenderingContext2D);
 });
+async function loading(url: string, signal = new AbortController().signal) {
+  const count = FakeImage.instances.length,
+    promise = loadImage(url, signal);
+  await vi.waitFor(() => expect(FakeImage.instances).toHaveLength(count + 1));
+  return { promise, image: FakeImage.instances[count] };
+}
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 it('requests anonymous CORS and validates exportability before resolving', async () => {
-  const promise = loadImage(
-      'https://example.com/image.png',
-      new AbortController().signal
-    ),
-    image = FakeImage.instances[0];
+  const { promise, image } = await loading(
+    'https://example.com/image.png',
+    new AbortController().signal
+  );
   expect(image.crossOrigin).toBe('anonymous');
-  expect(image.src).toBe('https://example.com/image.png');
+  expect(image.src).toBe('blob:owned-image');
+  expect(fetch).toHaveBeenCalledWith('https://example.com/image.png', {
+    signal: expect.any(AbortSignal),
+    credentials: 'same-origin',
+  });
   image.onload?.();
   expect(await promise).toMatchObject({
     width: 120,
@@ -41,11 +61,12 @@ it('requests anonymous CORS and validates exportability before resolving', async
   });
   expect(image.onload).toBeNull();
   expect(image.onerror).toBeNull();
+  expect((await promise).sourceBlob).toBeInstanceOf(Blob);
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:owned-image');
 });
 it('aborts decoding and detaches callbacks without waiting for the network', async () => {
   const controller = new AbortController(),
-    promise = loadImage('slow', controller.signal),
-    image = FakeImage.instances[0];
+    { promise, image } = await loading('slow', controller.signal);
   controller.abort();
   await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
   expect(image.src).toBe('');
@@ -57,13 +78,14 @@ it('does not start loading a request already cancelled', async () => {
   await expect(loadImage('ignored', controller.signal)).rejects.toMatchObject({
     name: 'AbortError',
   });
-  expect(FakeImage.instances[0].src).toBe('');
+  expect(FakeImage.instances).toHaveLength(0);
+  expect(fetch).not.toHaveBeenCalled();
 });
 it('rejects failed, empty and tainted images and missing Canvas2D', async () => {
-  const failed = loadImage('missing', new AbortController().signal);
+  const { promise: failed } = await loading('missing');
   FakeImage.instances.at(-1)!.onerror?.();
   await expect(failed).rejects.toThrow('Unable to load');
-  const empty = loadImage('empty', new AbortController().signal);
+  const { promise: empty } = await loading('empty');
   FakeImage.instances.at(-1)!.naturalWidth = 0;
   FakeImage.instances.at(-1)!.onload?.();
   await expect(empty).rejects.toThrow('no pixels');
@@ -73,11 +95,11 @@ it('rejects failed, empty and tainted images and missing Canvas2D', async () => 
       throw new DOMException('tainted', 'SecurityError');
     },
   } as unknown as CanvasRenderingContext2D);
-  const tainted = loadImage('tainted', new AbortController().signal);
+  const { promise: tainted } = await loading('tainted');
   FakeImage.instances.at(-1)!.onload?.();
   await expect(tainted).rejects.toMatchObject({ name: 'SecurityError' });
   vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue(null);
-  const unavailable = loadImage('canvas', new AbortController().signal);
+  const { promise: unavailable } = await loading('canvas');
   FakeImage.instances.at(-1)!.onload?.();
   await expect(unavailable).rejects.toThrow('Canvas2D');
 });

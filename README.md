@@ -2,7 +2,7 @@
 
 A fully local React image editor, maintained by ScioBot. The package owns the Canvas2D renderer, editable layers, history and controls. It has no runtime dependency other than React, loads no remote scripts or fonts, and never uploads images. Image URLs supplied by the host are the only network resources it reads.
 
-Version `2.0.0-rc.1` is a prepared release candidate. It replaces the hosted engine used in version 1. See [migration notes](#migrating-from-version-1) before upgrading. This candidate has not been published to npm.
+Version `2.0.0-rc.2` is a prepared release candidate. It replaces the hosted engine used in version 1. See [migration notes](#migrating-from-version-1) before upgrading. This candidate has not been published to npm.
 
 ## Install and use
 
@@ -13,7 +13,7 @@ pnpm install
 pnpm build
 npm pack --ignore-scripts
 # In the consuming app:
-npm install /path/to/lofcz-react-image-editor-2.0.0-rc.1.tgz
+npm install /path/to/lofcz-react-image-editor-2.0.0-rc.2.tgz
 ```
 
 ```tsx
@@ -92,6 +92,8 @@ Each pointer gesture and text editing transaction is one undo step. History reta
 | `restoreDocument(document): Promise<void>` | Validate and restore a document or serialized JSON against the currently loaded original source.                              |
 | `addImage(url): Promise<void>`             | Load and embed an image as a new editable layer.                                                                              |
 | `getSource(): CanvasImageSource \| null`   | Original source pixels for comparison or custom previews.                                                                     |
+| `getSourceBlob(): Promise<Blob>`           | Original encoded source bytes, retained from the successful load; rejects while not ready.                                    |
+| `getExportOptions(): ImageExportOptions`   | Independent copy of the current output settings for persistence.                                                              |
 | `revert()`                                 | Return to the loaded baseline as a single undoable edit.                                                                      |
 | `hasChanges(): boolean`                    | Whether the document differs from its loaded baseline. Saving does not mark it clean; reset to the saved source when desired. |
 | `reset(imageUrl?): Promise<void>`          | Load a new baseline, clearing selection and history after success. Without a URL, reload the last successful source.          |
@@ -102,7 +104,17 @@ The latest requested image wins. Superseded requests reject with `AbortError`; l
 
 Export options accept `type` (`image/png`, `image/jpeg`, `image/webp`), `quality` (0–1), `width`, `height` and `background`. A single output dimension preserves aspect ratio. Pass defaults as `options.export`, or override them for one `getImage`/`getBlob` call. Export controls remain available when the host hides Save/Cancel.
 
-To resume an editable document, retain its original source separately, load that source, and call `restoreDocument(savedDocument)`. A flattened export cannot recover its layers. Invalid state, a failed sticker load, or a newer edit leaves the current draft intact. A custom `options.imageLoader(url, signal)` can decode additional image formats; it must return origin-clean `{ source, width, height }` pixels and honor cancellation.
+To resume an editable document, save `getSourceBlob()`, `getDocument()` and `getExportOptions()` together with the rendered output. Load the original source, call `restoreDocument(savedDocument)`, and restore the export settings with `updateOptions({ export: savedOptions })`. A flattened export cannot recover its layers. Invalid state, a failed sticker load, or a newer edit leaves the current draft intact.
+
+`getSourceBlob()` retains the original encoded bytes from the successful image load, including JPEG metadata. It never downloads an expired URL during Save. Custom `options.imageLoader(url, signal)` decoders can return origin-clean `{ source, width, height, sourceBlob? }` pixels; without `sourceBlob`, the original pixels are encoded as PNG. Loaders must honor cancellation.
+
+Export settings support `fit: 'contain' | 'cover' | 'force'`, `upscale: false` to avoid enlargement, and `resampling: 'high' | 'pixelated'`. JPEG exports preserve EXIF by default while normalizing orientation and output dimensions and removing stale embedded thumbnails. Use `metadata: 'strip'` to omit metadata.
+
+Server code can import `createDocument`, `parseDocument`, `parseExportOptions`, `resolveExportSize` and document types from `@lofcz/react-image-editor/document`. That entry has no React or browser dependency; hosts can validate the same saved state on the client and server.
+
+The Path tool creates open paths and closed polygons with editable vertices. Shift-click or the layer list builds a multi-selection; marquee selection, group transforms, alignment and distribution keep one undo transaction. Text supports an outline, background and shadow; shapes support dashed strokes, cap/join styles, rounded corners and feathered edges.
+
+See [the parity ledger](https://github.com/lofcz/react-image-editor/blob/main/docs/PINTURA_PARITY.md) for verified capabilities and remaining reference gaps. A matching tool or preset count does not imply full Pintura parity.
 
 ## Configuration and layout
 

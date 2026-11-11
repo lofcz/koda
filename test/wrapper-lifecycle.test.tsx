@@ -1,6 +1,7 @@
 import { createRef } from 'react';
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { vi } from 'vitest';
+import { Blob as NodeBlob } from 'node:buffer';
 import { ImageEditor } from '../src/ImageEditor';
 import type { ImageEditorRef } from '../src/types';
 
@@ -29,6 +30,22 @@ afterEach(() => {
 it('replaces and removes imageLoader without resetting the current draft', async () => {
   NativeImage.instances = [];
   vi.stubGlobal('Image', NativeImage);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => ({
+      ok: true,
+      blob: async () => new NodeBlob(['native pixels'], { type: 'image/png' }),
+    }))
+  );
+  const createObjectURL = vi.fn(() => 'blob:native-source'),
+    revokeObjectURL = vi.fn();
+  vi.stubGlobal(
+    'URL',
+    class extends URL {
+      static createObjectURL = createObjectURL;
+      static revokeObjectURL = revokeObjectURL;
+    }
+  );
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
     drawImage: vi.fn(),
     getImageData: () => ({ data: new Uint8ClampedArray(4) }),
@@ -101,11 +118,18 @@ it('replaces and removes imageLoader without resetting the current draft', async
   expect(editor.hasChanges()).toBe(true);
   await act(async () => {
     const pending = editor.reset('native-source');
+    await waitFor(() => expect(NativeImage.instances).toHaveLength(1));
     const native = NativeImage.instances.at(-1)!;
-    expect(native.src).toBe('native-source');
+    expect(native.src).toBe('blob:native-source');
     native.onload?.();
     await pending;
   });
+  expect(fetch).toHaveBeenCalledExactlyOnceWith('native-source', {
+    signal: expect.any(AbortSignal),
+    credentials: 'same-origin',
+  });
+  expect(createObjectURL).toHaveBeenCalledOnce();
+  expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:native-source');
   expect(editor.getDocument()).toMatchObject({ width: 320, height: 240 });
   expect(nextLoader).toHaveBeenCalledTimes(1);
   expect(onLoad).toHaveBeenCalledTimes(1);

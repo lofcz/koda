@@ -7,6 +7,12 @@ import {
   translate,
 } from './model';
 import { exportCanvas } from './render';
+import { parseExportOptions } from './exportOptions';
+import {
+  addJpegExif,
+  addJpegExifToDataUrl,
+  readJpegExif,
+} from './jpegMetadata';
 import type {
   ImageEditorChange,
   ImageEditorInstance,
@@ -24,6 +30,7 @@ export type EngineState = {
   options: ImageEditorOptions;
   error: Error | null;
   selected: string | null;
+  selectedIds: readonly string[];
   canUndo: boolean;
   canRedo: boolean;
   revision: number;
@@ -33,10 +40,7 @@ export const abortError = () =>
   new DOMException('Image loading was superseded', 'AbortError');
 export const isAbort = (error: unknown) =>
   error instanceof Error && error.name === 'AbortError';
-export function loadImage(
-  url: string,
-  signal: AbortSignal
-): Promise<LoadedImage> {
+function decodeImage(url: string, signal: AbortSignal): Promise<LoadedImage> {
   return new Promise((resolve, reject) => {
     const image = new Image();
     const clean = () => {
@@ -86,6 +90,24 @@ export function loadImage(
     image.src = url;
   });
 }
+export async function loadImage(
+  url: string,
+  signal: AbortSignal
+): Promise<LoadedImage> {
+  if (signal.aborted) throw abortError();
+  const response = await fetch(url, { signal, credentials: 'same-origin' });
+  if (!response.ok)
+    throw new Error('Unable to load the image. Check the URL and CORS access.');
+  const sourceBlob = await response.blob();
+  if (signal.aborted) throw abortError();
+  const objectUrl = URL.createObjectURL(sourceBlob);
+  try {
+    const image = await decodeImage(objectUrl, signal);
+    return { ...image, sourceBlob };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
 /** Owns document/history and image lifetimes. No DOM/UI dependency until load/export. */
 export class CanvasEngine implements ImageEditorInstance {
   private state: EngineState = {
@@ -94,6 +116,7 @@ export class CanvasEngine implements ImageEditorInstance {
     options: {},
     error: null,
     selected: null,
+    selectedIds: [],
     canUndo: false,
     canRedo: false,
     revision: 0,
@@ -108,6 +131,7 @@ export class CanvasEngine implements ImageEditorInstance {
   private loadedUrl = '';
   private exportFinalizer: (() => void) | null = null;
   private history: DocumentHistory | null = null;
+  private sourceExif: Uint8Array | null = null;
   private restoreGeneration = 0;
   private assetControllers = new Set<AbortController>();
   /** Decoded image layers are owned by the engine; documents only contain serializable sources. */
@@ -161,11 +185,13 @@ export class CanvasEngine implements ImageEditorInstance {
     this.assets = new Map();
     this.exportFinalizer = null;
     this.image = null;
+    this.sourceExif = null;
     this.history = null;
     this.emit({
       phase: 'destroyed',
       document: null,
       selected: null,
+      selectedIds: [],
       canUndo: false,
       canRedo: false,
     });
@@ -186,7 +212,8 @@ export class CanvasEngine implements ImageEditorInstance {
     if (this.state.phase === 'destroyed')
       throw new Error('Editor was destroyed');
     const previousUrl = this.loadedUrl,
-      previousSelection = this.state.selected;
+      previousSelection = this.state.selected,
+      previousSelectedIds = this.state.selectedIds;
     const generation = ++this.generation;
     this.controller?.abort();
     const controller = new AbortController();
@@ -198,10 +225,21 @@ export class CanvasEngine implements ImageEditorInstance {
         url,
         controller.signal
       );
+      let sourceExif: Uint8Array | null = null;
+      if (image.sourceBlob) {
+        const signature = new Uint8Array(
+          await image.sourceBlob.slice(0, 2).arrayBuffer()
+        );
+        if (signature[0] === 0xff && signature[1] === 0xd8)
+          sourceExif = readJpegExif(
+            new Uint8Array(await image.sourceBlob.arrayBuffer())
+          );
+      }
       if (generation !== this.generation || controller.signal.aborted)
         throw abortError();
       const doc = createDocument(image.width, image.height);
       this.image = image;
+      this.sourceExif = sourceExif;
       this.assetControllers.forEach((pending) => pending.abort());
       this.assetControllers.clear();
       this.assets = new Map();
@@ -214,6 +252,7 @@ export class CanvasEngine implements ImageEditorInstance {
         document: doc,
         error: null,
         selected: null,
+        selectedIds: [],
         canUndo: false,
         canRedo: false,
         revision: this.state.revision + 1,
@@ -226,6 +265,7 @@ export class CanvasEngine implements ImageEditorInstance {
         this.emit({
           phase: this.history ? 'ready' : 'error',
           selected: previousSelection,
+          selectedIds: previousSelectedIds,
           error: error instanceof Error ? error : new Error(String(error)),
         });
       }
@@ -249,36 +289,35 @@ export class CanvasEngine implements ImageEditorInstance {
       });
   }
   private outputOptions(options: ImageExportOptions = {}): ImageExportOptions {
-    const output = {
+    return parseExportOptions({
       ...this.state.options.export,
       ...options,
       type: options.type ?? this.state.options.export?.type ?? 'image/png',
-    };
-    if (!['image/png', 'image/jpeg', 'image/webp'].includes(output.type))
-      throw new Error('Unsupported image format');
-    if (
-      output.quality !== undefined &&
-      (!Number.isFinite(output.quality) ||
-        output.quality < 0 ||
-        output.quality > 1)
-    )
-      throw new Error('Invalid image quality');
-    // Validate supplied dimensions before an export can finalize pending UI edits.
-    dimensions(output.width ?? 1, output.height ?? 1);
-    return output;
+    });
+  }
+  getExportOptions() {
+    return this.outputOptions();
   }
   getImage(options?: ImageExportOptions) {
     if (this.state.phase !== 'ready') return null;
     const output = this.outputOptions(options);
     this.flush();
-    return this.history && this.image
-      ? exportCanvas(
-          this.history.current,
-          this.image.source,
-          output,
-          this.assets
-        ).toDataURL(output.type, output.quality)
-      : null;
+    if (!this.history || !this.image) return null;
+    const canvas = exportCanvas(
+        this.history.current,
+        this.image.source,
+        output,
+        this.assets
+      ),
+      dataUrl = canvas.toDataURL(output.type, output.quality);
+    return output.metadata === 'strip'
+      ? dataUrl
+      : addJpegExifToDataUrl(
+          dataUrl,
+          this.sourceExif,
+          canvas.width,
+          canvas.height
+        );
   }
   async getBlob(options?: ImageExportOptions): Promise<Blob> {
     if (this.state.phase !== 'ready' || !this.history || !this.image)
@@ -291,7 +330,8 @@ export class CanvasEngine implements ImageEditorInstance {
       output,
       this.assets
     );
-    return new Promise((resolve, reject) =>
+    const exif = this.sourceExif;
+    const blob = await new Promise<Blob>((resolve, reject) =>
       canvas.toBlob(
         (blob) =>
           blob ? resolve(blob) : reject(new Error('Image export failed')),
@@ -299,9 +339,36 @@ export class CanvasEngine implements ImageEditorInstance {
         output.quality
       )
     );
+    if (output.metadata === 'strip' || blob.type !== 'image/jpeg' || !exif)
+      return blob;
+    const bytes = addJpegExif(
+      new Uint8Array(await blob.arrayBuffer()),
+      exif,
+      canvas.width,
+      canvas.height
+    );
+    return new Blob([bytes as Uint8Array<ArrayBuffer>], { type: blob.type });
   }
   getSource() {
     return this.image?.source ?? null;
+  }
+  async getSourceBlob(): Promise<Blob> {
+    const image = this.image;
+    if (!image) throw new Error('Editor is not ready');
+    if (image.sourceBlob) return image.sourceBlob;
+    const canvas = exportCanvas(
+      createDocument(image.width, image.height),
+      image.source
+    );
+    return new Promise((resolve, reject) =>
+      canvas.toBlob(
+        (blob) =>
+          blob
+            ? resolve(blob)
+            : reject(new Error('Source image export failed')),
+        'image/png'
+      )
+    );
   }
   getDocument() {
     if (this.state.phase !== 'ready' || !this.history) return null;
@@ -429,27 +496,35 @@ export class CanvasEngine implements ImageEditorInstance {
     return this.history?.changed ?? false;
   }
   select(selected: string | null) {
-    this.emit({
-      selected:
-        selected &&
-        this.state.document?.layers.some(
-          (layer) => layer.id === selected && !layer.locked && !layer.hidden
-        )
-          ? selected
-          : null,
-    });
+    this.selectMany(selected ? [selected] : []);
+  }
+  selectMany(ids: readonly string[]) {
+    const selectedIds = [...new Set(ids)].filter((id) =>
+      this.state.document?.layers.some(
+        (layer) => layer.id === id && !layer.locked && !layer.hidden
+      )
+    );
+    this.emit({ selectedIds, selected: selectedIds.at(-1) ?? null });
+  }
+  toggleSelection(id: string) {
+    this.selectMany(
+      this.state.selectedIds.includes(id)
+        ? this.state.selectedIds.filter((selected) => selected !== id)
+        : [...this.state.selectedIds, id]
+    );
   }
   private publish(committed = false) {
     if (!this.history) return;
-    const selected = this.history.current.layers.some(
-      (layer) =>
-        layer.id === this.state.selected && !layer.locked && !layer.hidden
-    )
-      ? this.state.selected
-      : null;
+    const selectedIds = this.state.selectedIds.filter((id) =>
+        this.history!.current.layers.some(
+          (layer) => layer.id === id && !layer.locked && !layer.hidden
+        )
+      ),
+      selected = selectedIds.at(-1) ?? null;
     this.emit({
       document: this.history.current,
       selected,
+      selectedIds,
       canUndo: this.history.past.length > 0,
       canRedo: this.history.future.length > 0,
       revision: this.state.revision + 1,
@@ -492,16 +567,12 @@ export class CanvasEngine implements ImageEditorInstance {
   }
   removeSelected() {
     const doc = this.state.document;
-    if (
-      doc &&
-      this.state.selected &&
-      doc.layers.some(
-        (layer) => layer.id === this.state.selected && !layer.locked
-      )
-    )
+    if (doc && this.state.selectedIds.length)
       this.commit({
         ...doc,
-        layers: doc.layers.filter((layer) => layer.id !== this.state.selected),
+        layers: doc.layers.filter(
+          (layer) => !this.state.selectedIds.includes(layer.id) || layer.locked
+        ),
       });
   }
 }

@@ -15,6 +15,13 @@ export type Layer = {
   strokeWidth: number;
   opacity: number;
   points?: readonly Point[];
+  pathClosed?: boolean;
+  pathEditable?: boolean;
+  strokeDash?: readonly number[];
+  strokeCap?: 'butt' | 'round' | 'square';
+  strokeJoin?: 'miter' | 'round' | 'bevel';
+  cornerRadius?: number;
+  feather?: number;
   erase?: boolean;
   text?: string;
   fontSize?: number;
@@ -24,6 +31,13 @@ export type Layer = {
   underline?: boolean;
   textAlign?: 'left' | 'center' | 'right';
   lineHeight?: number;
+  textOutline?: { color: string; width: number };
+  textShadow?: {
+    color: string;
+    blur: number;
+    offsetX: number;
+    offsetY: number;
+  };
   arrowStart?: LineEnd;
   arrowEnd?: LineEnd;
   imageSource?: string;
@@ -426,6 +440,23 @@ export function hitLayer(layer: Layer, point: Point, tolerance = 4): boolean {
   const stroke = layer.strokeWidth / 2 + localTolerance;
   if (layer.kind === 'path') {
     const points = layer.points ?? [];
+    if (layer.pathClosed && points.length > 2) {
+      if (segmentDistance(p, points[points.length - 1], points[0]) <= stroke)
+        return true;
+      if (layer.fill !== 'transparent') {
+        let inside = false;
+        for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+          const a = points[i],
+            b = points[j];
+          if (
+            a.y > p.y !== b.y > p.y &&
+            p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x
+          )
+            inside = !inside;
+        }
+        if (inside) return true;
+      }
+    }
     return points.some(
       (q, i) => segmentDistance(p, points[Math.max(0, i - 1)], q) <= stroke
     );
@@ -452,6 +483,22 @@ export function hitLayer(layer: Layer, point: Point, tolerance = 4): boolean {
     p.y > layer.height + stroke
   )
     return false;
+  if (layer.kind === 'rectangle' && layer.cornerRadius) {
+    const radius = Math.min(
+        layer.cornerRadius,
+        layer.width / 2,
+        layer.height / 2
+      ),
+      x = Math.abs(p.x - layer.width / 2) - (layer.width / 2 - radius),
+      y = Math.abs(p.y - layer.height / 2) - (layer.height / 2 - radius),
+      distance =
+        Math.min(Math.max(x, y), 0) +
+        Math.hypot(Math.max(x, 0), Math.max(y, 0)) -
+        radius;
+    return layer.fill === 'transparent'
+      ? Math.abs(distance) <= stroke
+      : distance <= stroke;
+  }
   if (layer.kind === 'rectangle' && layer.fill === 'transparent')
     return (
       p.x <= stroke ||
@@ -665,6 +712,8 @@ export function parseDocument(input: unknown): ImageDocument {
     };
     for (const key of [
       'erase',
+      'pathClosed',
+      'pathEditable',
       'bold',
       'italic',
       'underline',
@@ -676,6 +725,26 @@ export function parseDocument(input: unknown): ImageDocument {
         layer[key] = v[key];
       }
     }
+    if (v.strokeDash !== undefined) {
+      if (!Array.isArray(v.strokeDash) || v.strokeDash.length > 32)
+        throw new Error('Invalid stroke pattern');
+      layer.strokeDash = v.strokeDash.map((n) => number(n, 0, MAX_DIMENSION));
+    }
+    if (v.strokeCap !== undefined)
+      layer.strokeCap = choice(
+        v.strokeCap,
+        ['butt', 'round', 'square'],
+        'round'
+      );
+    if (v.strokeJoin !== undefined)
+      layer.strokeJoin = choice(
+        v.strokeJoin,
+        ['miter', 'round', 'bevel'],
+        'round'
+      );
+    if (v.cornerRadius !== undefined)
+      layer.cornerRadius = number(v.cornerRadius, 0, MAX_DIMENSION);
+    if (v.feather !== undefined) layer.feather = number(v.feather, 0, 512);
     if (v.points !== undefined) {
       if (!Array.isArray(v.points) || (pointCount += v.points.length) > 1000000)
         throw new Error('Invalid layer points');
@@ -694,6 +763,22 @@ export function parseDocument(input: unknown): ImageDocument {
         ['left', 'center', 'right'],
         'left'
       );
+      if (v.textOutline !== undefined) {
+        const outline = object(v.textOutline);
+        layer.textOutline = {
+          color: string(outline.color, '#ffffff', 256),
+          width: number(outline.width, 0, 512, 0),
+        };
+      }
+      if (v.textShadow !== undefined) {
+        const shadow = object(v.textShadow);
+        layer.textShadow = {
+          color: string(shadow.color, '#000000', 256),
+          blur: number(shadow.blur, 0, 512, 0),
+          offsetX: number(shadow.offsetX, -MAX_DIMENSION, MAX_DIMENSION, 0),
+          offsetY: number(shadow.offsetY, -MAX_DIMENSION, MAX_DIMENSION, 0),
+        };
+      }
     }
     if (layer.kind === 'line' || layer.kind === 'arrow') {
       layer.arrowStart = choice(

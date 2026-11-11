@@ -6,7 +6,8 @@ import React, {
   useState,
 } from 'react';
 import { CanvasEngine, EngineState } from './engine';
-import { CanvasSurface, SurfaceActions } from './CanvasSurface';
+import { CanvasSurface, PathState, SurfaceActions } from './CanvasSurface';
+import { alignLayers, distributeLayers, duplicateLayers } from './interactions';
 import {
   cropDocument,
   DEFAULT_EFFECTS,
@@ -425,7 +426,15 @@ export function EditorUI({
     [helpOpen, setHelpOpen] = useState(false),
     [adding, setAdding] = useState(false),
     [angle, setAngle] = useState(0),
-    [shape, setShape] = useState<ShapeKind | null>(null),
+    [shape, setShape] = useState<ShapeKind | 'path' | null>(null),
+    [pathState, setPathState] = useState<PathState>({
+      drawing: false,
+      editing: false,
+      canFinish: false,
+      canClose: false,
+      canRemovePoint: false,
+    }),
+    [multiSelect, setMultiSelect] = useState(false),
     [redaction, setRedaction] = useState<{
       mode: 'pixelate' | 'blur' | 'solid';
       size: number;
@@ -456,18 +465,31 @@ export function EditorUI({
   useLayoutEffect(
     () =>
       engine.beforeExport(
-        tool === 'crop' && doc
+        (tool === 'crop' && doc) || pathState.drawing
           ? () => {
-              engine.commit(cropDocument(doc, crop));
-              setTool('select');
-              setPanel(false);
+              if (pathState.drawing) surface.current?.finishPath();
+              if (tool === 'crop' && doc) {
+                engine.commit(cropDocument(doc, crop));
+                setTool('select');
+                setPanel(false);
+              }
             }
           : null
       ),
-    [engine, tool, doc, crop]
+    [engine, tool, doc, crop, pathState.drawing]
   );
   const disabled = state.phase !== 'ready' || saving;
+  useLayoutEffect(() => {
+    if (tool === 'shapes' && (shape === 'path' || pathState.editing))
+      shell.current
+        ?.querySelector('.rie-options-content')
+        ?.scrollTo({ top: 0 });
+  }, [tool, shape, pathState.drawing, pathState.editing]);
   const layer = doc?.layers.find((item) => item.id === state.selected);
+  const selectedIds = state.selectedIds;
+  const selectedLayers =
+    doc?.layers.filter((item) => selectedIds.includes(item.id)) ?? [];
+  const isGroup = selectedLayers.length > 1;
   const fullCrop = () =>
     doc
       ? { x: 0, y: 0, width: doc.width, height: doc.height }
@@ -520,6 +542,15 @@ export function EditorUI({
   };
   const previewLayer = (patch: Partial<Layer>) => {
     if (doc && layer) engine.preview(updateLayer(doc, layer.id, patch));
+  };
+  const changeSelection = (patch: Partial<Layer>, preview = false) => {
+    if (!doc) return;
+    const next = selectedIds.reduce(
+      (document, id) => updateLayer(document, id, patch),
+      doc
+    );
+    if (preview) engine.preview(next);
+    else engine.commit(next);
   };
   const gesture = { onStart: () => engine.begin(), onEnd: () => engine.end() };
   const addShape = (kind: ShapeKind) => {
@@ -700,182 +731,432 @@ export function EditorUI({
       setSaving(false);
     }
   };
-  const selectedControls =
-    layer && doc ? (
-      <div className="rie-stack" data-testid="native-selection-controls">
+  const groupControls =
+    doc && isGroup ? (
+      <div className="rie-stack" data-testid="native-group-controls">
+        <p className="rie-selection-count" role="status">
+          {t('selection.count').replace(
+            '{count}',
+            String(selectedLayers.length)
+          )}
+        </p>
         <div className="rie-row">
           {iconButton('duplicate', 'actions.duplicate', () => {
-            const next = duplicateLayer(doc, layer.id);
-            engine.commit(next);
-            engine.select(
-              next.layers.find(
-                (item) =>
-                  !doc.layers.some((existing) => existing.id === item.id)
-              )?.id ?? null
-            );
+            const copy = duplicateLayers(doc, selectedIds);
+            engine.commit(copy.document);
+            engine.selectMany(copy.ids);
           })}
-          {iconButton('forward', 'actions.forward', () => reorder(1))}
-          {iconButton('backward', 'actions.backward', () => reorder(-1))}
           {iconButton('delete', 'actions.delete', () =>
             engine.removeSelected()
           )}
         </div>
-        <div className="rie-row">
-          {iconButton('flip_horizontal', 'rotate.flip_horizontal', () =>
-            changeLayer(flipLayer(layer, true))
-          )}
-          {iconButton('flip_vertical', 'rotate.flip_vertical', () =>
-            changeLayer(flipLayer(layer, false))
-          )}
-          <button
-            type="button"
-            className="rie-icon-button"
-            title={t('selection.locked')}
-            aria-label={t('selection.locked')}
-            aria-pressed={!!layer.locked}
-            onClick={() => changeLayer({ locked: !layer.locked })}
-          >
-            <Icon name="lock" />
-          </button>
-          <button
-            type="button"
-            className="rie-icon-button"
-            title={t('selection.hidden')}
-            aria-label={t('selection.hidden')}
-            aria-pressed={!!layer.hidden}
-            onClick={() => changeLayer({ hidden: !layer.hidden })}
-          >
-            <Icon name="hidden" />
-          </button>
-        </div>
-        {layer.kind !== 'image' ? (
-          <ColorField
-            label={t('draw.color')}
-            value={layer.color}
-            onChange={(color) => changeLayer({ color })}
-          />
-        ) : null}
-        {!['text', 'image', 'redaction'].includes(layer.kind) ? (
-          <NumberField
-            label={t('shapes.stroke_width')}
-            value={layer.strokeWidth}
-            min={0}
-            max={300}
-            onCommit={(strokeWidth) => changeLayer({ strokeWidth })}
-          />
-        ) : null}
-        {!['path', 'text', 'line', 'arrow', 'image', 'redaction'].includes(
-          layer.kind
-        ) ? (
-          <>
-            <ColorField
-              label={t('shapes.fill')}
-              value={layer.fill}
-              onChange={(fill) => changeLayer({ fill })}
-            />
-            <button
-              type="button"
-              aria-pressed={layer.fill === 'transparent'}
-              onClick={() =>
-                changeLayer({
-                  fill:
-                    layer.fill === 'transparent' ? '#0797a7' : 'transparent',
-                })
-              }
-            >
-              {t('shapes.transparent')}
-            </button>
-          </>
-        ) : null}
-        {['line', 'arrow'].includes(layer.kind) ? (
-          <div className="rie-grid">
-            {(['arrowStart', 'arrowEnd'] as const).map((key) => (
-              <ChoicePicker
-                key={key}
-                label={t(
-                  key === 'arrowStart'
-                    ? 'shapes.arrow_start'
-                    : 'shapes.arrow_end'
+        <fieldset className="rie-control-group">
+          <legend>{t('selection.align')}</legend>
+          <div className="rie-alignment-grid">
+            {(
+              ['left', 'center', 'right', 'top', 'middle', 'bottom'] as const
+            ).map((alignment) => (
+              <React.Fragment key={alignment}>
+                {iconButton(
+                  `objects_${alignment}`,
+                  `selection.align_${alignment}`,
+                  () => engine.commit(alignLayers(doc, selectedIds, alignment)),
+                  false,
+                  `native-align-${alignment}`
                 )}
-                value={
-                  layer[key] ??
-                  (key === 'arrowEnd' && layer.kind === 'arrow'
-                    ? 'arrow'
-                    : 'none')
-                }
-                choices={['none', 'arrow', 'circle', 'square'].map((value) => ({
-                  value,
-                  label: t(`shapes.end_${value}`),
-                }))}
-                onChange={(value) => changeLayer({ [key]: value })}
-                t={t}
-              />
+              </React.Fragment>
+            ))}
+            {(['horizontal', 'vertical'] as const).map((axis) => (
+              <React.Fragment key={axis}>
+                {iconButton(
+                  `distribute_${axis}`,
+                  `selection.distribute_${axis}`,
+                  () => engine.commit(distributeLayers(doc, selectedIds, axis)),
+                  selectedIds.length < 3,
+                  `native-distribute-${axis}`
+                )}
+              </React.Fragment>
             ))}
           </div>
-        ) : null}
+        </fieldset>
+        <ColorField
+          label={t('draw.color')}
+          value={layer?.color ?? '#0797a7'}
+          onChange={(color) => changeSelection({ color })}
+        />
+        <ColorField
+          label={t('shapes.fill')}
+          value={layer?.fill ?? 'transparent'}
+          onChange={(fill) => changeSelection({ fill })}
+        />
+        <button
+          type="button"
+          onClick={() => changeSelection({ fill: 'transparent' })}
+        >
+          {t('shapes.transparent')}
+        </button>
+        <NumberField
+          label={t('shapes.stroke_width')}
+          value={layer?.strokeWidth ?? 0}
+          min={0}
+          max={300}
+          onCommit={(strokeWidth) => changeSelection({ strokeWidth })}
+        />
         <SliderField
           label={t('draw.opacity')}
-          value={Math.round(layer.opacity * 100)}
-          onChange={(opacity) => previewLayer({ opacity: opacity / 100 })}
+          value={Math.round((layer?.opacity ?? 1) * 100)}
+          onChange={(opacity) =>
+            changeSelection({ opacity: opacity / 100 }, true)
+          }
           {...gesture}
           suffix="%"
         />
+      </div>
+    ) : null;
+  const selectedControls = isGroup ? (
+    groupControls
+  ) : layer && doc ? (
+    <div className="rie-stack" data-testid="native-selection-controls">
+      <div className="rie-row">
+        {iconButton('duplicate', 'actions.duplicate', () => {
+          const next = duplicateLayer(doc, layer.id);
+          engine.commit(next);
+          engine.select(
+            next.layers.find(
+              (item) => !doc.layers.some((existing) => existing.id === item.id)
+            )?.id ?? null
+          );
+        })}
+        {iconButton('forward', 'actions.forward', () => reorder(1))}
+        {iconButton('backward', 'actions.backward', () => reorder(-1))}
+        {iconButton('delete', 'actions.delete', () => engine.removeSelected())}
+      </div>
+      <div className="rie-row">
+        {iconButton('flip_horizontal', 'rotate.flip_horizontal', () =>
+          changeLayer(flipLayer(layer, true))
+        )}
+        {iconButton('flip_vertical', 'rotate.flip_vertical', () =>
+          changeLayer(flipLayer(layer, false))
+        )}
+        <button
+          type="button"
+          className="rie-icon-button"
+          title={t('selection.locked')}
+          aria-label={t('selection.locked')}
+          aria-pressed={!!layer.locked}
+          onClick={() => changeLayer({ locked: !layer.locked })}
+        >
+          <Icon name="lock" />
+        </button>
+        <button
+          type="button"
+          className="rie-icon-button"
+          title={t('selection.hidden')}
+          aria-label={t('selection.hidden')}
+          aria-pressed={!!layer.hidden}
+          onClick={() => changeLayer({ hidden: !layer.hidden })}
+        >
+          <Icon name="hidden" />
+        </button>
+      </div>
+      {layer.kind !== 'image' ? (
+        <ColorField
+          label={t('draw.color')}
+          value={layer.color}
+          onChange={(color) => changeLayer({ color })}
+        />
+      ) : null}
+      {!['text', 'image', 'redaction'].includes(layer.kind) ? (
         <NumberField
-          label={t('selection.rotation')}
-          value={(Math.atan2(layer.matrix[1], layer.matrix[0]) * 180) / Math.PI}
-          min={-360}
-          max={360}
-          testId="native-selection-rotation"
-          onCommit={(angle) =>
-            changeLayer(
-              rotateLayer(
-                layer,
-                angle -
-                  (Math.atan2(layer.matrix[1], layer.matrix[0]) * 180) / Math.PI
-              )
+          label={t('shapes.stroke_width')}
+          value={layer.strokeWidth}
+          min={0}
+          max={300}
+          onCommit={(strokeWidth) => changeLayer({ strokeWidth })}
+        />
+      ) : null}
+      {!['line', 'arrow', 'image', 'redaction'].includes(layer.kind) ? (
+        <>
+          <ColorField
+            label={t(layer.kind === 'text' ? 'text.background' : 'shapes.fill')}
+            value={layer.fill}
+            onChange={(fill) => changeLayer({ fill })}
+          />
+          <button
+            type="button"
+            aria-pressed={layer.fill === 'transparent'}
+            onClick={() =>
+              changeLayer({
+                fill: layer.fill === 'transparent' ? '#0797a7' : 'transparent',
+              })
+            }
+          >
+            {t('shapes.transparent')}
+          </button>
+        </>
+      ) : null}
+      {layer.kind === 'path' && layer.pathEditable ? (
+        <div className="rie-stack">
+          <button
+            type="button"
+            aria-pressed={pathState.editing}
+            data-testid="native-path-edit"
+            onClick={() => surface.current?.editPath(layer.id)}
+          >
+            {t('path.edit')}
+          </button>
+          <button
+            type="button"
+            aria-pressed={!!layer.pathClosed}
+            disabled={(layer.points?.length ?? 0) < 3}
+            onClick={() => changeLayer({ pathClosed: !layer.pathClosed })}
+          >
+            {t('path.closed')}
+          </button>
+        </div>
+      ) : null}
+      {!['text', 'image', 'redaction'].includes(layer.kind) ? (
+        <details className="rie-advanced">
+          <summary>{t('shapes.stroke_style')}</summary>
+          <div className="rie-stack">
+            <ChoicePicker
+              label={t('shapes.pattern')}
+              value={
+                !layer.strokeDash?.length
+                  ? 'solid'
+                  : layer.strokeDash[0] <= 2
+                    ? 'dotted'
+                    : 'dashed'
+              }
+              choices={['solid', 'dashed', 'dotted'].map((value) => ({
+                value,
+                label: t(`shapes.pattern_${value}`),
+              }))}
+              onChange={(value) =>
+                changeLayer({
+                  strokeDash:
+                    value === 'solid'
+                      ? []
+                      : value === 'dotted'
+                        ? [1, Math.max(4, layer.strokeWidth * 2)]
+                        : [
+                            Math.max(8, layer.strokeWidth * 3),
+                            Math.max(4, layer.strokeWidth * 2),
+                          ],
+                })
+              }
+              t={t}
+            />
+            <ChoicePicker
+              label={t('shapes.cap')}
+              value={layer.strokeCap ?? 'round'}
+              choices={['butt', 'round', 'square'].map((value) => ({
+                value,
+                label: t(`shapes.cap_${value}`),
+              }))}
+              onChange={(value) =>
+                changeLayer({ strokeCap: value as Layer['strokeCap'] })
+              }
+              t={t}
+            />
+            <ChoicePicker
+              label={t('shapes.join')}
+              value={layer.strokeJoin ?? 'round'}
+              choices={['miter', 'round', 'bevel'].map((value) => ({
+                value,
+                label: t(`shapes.join_${value}`),
+              }))}
+              onChange={(value) =>
+                changeLayer({ strokeJoin: value as Layer['strokeJoin'] })
+              }
+              t={t}
+            />
+            {layer.kind === 'rectangle' ? (
+              <NumberField
+                label={t('shapes.corner_radius')}
+                value={layer.cornerRadius ?? 0}
+                min={0}
+                max={Math.min(layer.width, layer.height) / 2}
+                onCommit={(cornerRadius) => changeLayer({ cornerRadius })}
+              />
+            ) : null}
+            <SliderField
+              label={t('shapes.feather')}
+              value={layer.feather ?? 0}
+              max={100}
+              onChange={(feather) => previewLayer({ feather })}
+              {...gesture}
+              suffix=" px"
+            />
+          </div>
+        </details>
+      ) : null}
+      {layer.kind === 'text' ? (
+        <details className="rie-advanced">
+          <summary>{t('text.effects')}</summary>
+          <div className="rie-stack">
+            <NumberField
+              label={t('text.outline_width')}
+              value={layer.textOutline?.width ?? 0}
+              min={0}
+              max={100}
+              onCommit={(width) =>
+                changeLayer({
+                  textOutline: {
+                    color: layer.textOutline?.color ?? '#ffffff',
+                    width,
+                  },
+                })
+              }
+            />
+            <ColorField
+              label={t('text.outline_color')}
+              value={layer.textOutline?.color ?? '#ffffff'}
+              onChange={(color) =>
+                changeLayer({
+                  textOutline: { width: layer.textOutline?.width || 2, color },
+                })
+              }
+            />
+            <button
+              type="button"
+              aria-pressed={!!layer.textShadow}
+              onClick={() =>
+                changeLayer({
+                  textShadow: layer.textShadow
+                    ? undefined
+                    : { color: '#000000', blur: 4, offsetX: 2, offsetY: 2 },
+                })
+              }
+            >
+              {t('text.shadow')}
+            </button>
+            {layer.textShadow ? (
+              <>
+                <ColorField
+                  label={t('text.shadow_color')}
+                  value={layer.textShadow.color}
+                  onChange={(color) =>
+                    changeLayer({ textShadow: { ...layer.textShadow!, color } })
+                  }
+                />
+                <NumberField
+                  label={t('text.shadow_blur')}
+                  value={layer.textShadow.blur}
+                  min={0}
+                  max={100}
+                  onCommit={(blur) =>
+                    changeLayer({ textShadow: { ...layer.textShadow!, blur } })
+                  }
+                />
+                <div className="rie-grid">
+                  {(['offsetX', 'offsetY'] as const).map((key) => (
+                    <NumberField
+                      key={key}
+                      label={t(`text.shadow_${key}`)}
+                      value={layer.textShadow![key]}
+                      min={-100}
+                      max={100}
+                      onCommit={(value) =>
+                        changeLayer({
+                          textShadow: { ...layer.textShadow!, [key]: value },
+                        })
+                      }
+                    />
+                  ))}
+                </div>
+              </>
+            ) : null}
+          </div>
+        </details>
+      ) : null}
+      {['line', 'arrow'].includes(layer.kind) ? (
+        <div className="rie-grid">
+          {(['arrowStart', 'arrowEnd'] as const).map((key) => (
+            <ChoicePicker
+              key={key}
+              label={t(
+                key === 'arrowStart' ? 'shapes.arrow_start' : 'shapes.arrow_end'
+              )}
+              value={
+                layer[key] ??
+                (key === 'arrowEnd' && layer.kind === 'arrow'
+                  ? 'arrow'
+                  : 'none')
+              }
+              choices={['none', 'arrow', 'circle', 'square'].map((value) => ({
+                value,
+                label: t(`shapes.end_${value}`),
+              }))}
+              onChange={(value) => changeLayer({ [key]: value })}
+              t={t}
+            />
+          ))}
+        </div>
+      ) : null}
+      <SliderField
+        label={t('draw.opacity')}
+        value={Math.round(layer.opacity * 100)}
+        onChange={(opacity) => previewLayer({ opacity: opacity / 100 })}
+        {...gesture}
+        suffix="%"
+      />
+      <NumberField
+        label={t('selection.rotation')}
+        value={(Math.atan2(layer.matrix[1], layer.matrix[0]) * 180) / Math.PI}
+        min={-360}
+        max={360}
+        testId="native-selection-rotation"
+        onCommit={(angle) =>
+          changeLayer(
+            rotateLayer(
+              layer,
+              angle -
+                (Math.atan2(layer.matrix[1], layer.matrix[0]) * 180) / Math.PI
             )
+          )
+        }
+      />
+      <div className="rie-grid">
+        <NumberField
+          label={t('resize.width')}
+          value={layer.width * Math.hypot(layer.matrix[0], layer.matrix[1])}
+          onCommit={(width) =>
+            changeLayer({
+              matrix: multiply(
+                layer.matrix,
+                scale(
+                  width /
+                    (layer.width *
+                      Math.hypot(layer.matrix[0], layer.matrix[1])),
+                  1
+                )
+              ),
+            })
           }
         />
-        <div className="rie-grid">
-          <NumberField
-            label={t('resize.width')}
-            value={layer.width * Math.hypot(layer.matrix[0], layer.matrix[1])}
-            onCommit={(width) =>
-              changeLayer({
-                matrix: multiply(
-                  layer.matrix,
-                  scale(
-                    width /
-                      (layer.width *
-                        Math.hypot(layer.matrix[0], layer.matrix[1])),
-                    1
-                  )
-                ),
-              })
-            }
-          />
-          <NumberField
-            label={t('resize.height')}
-            value={layer.height * Math.hypot(layer.matrix[2], layer.matrix[3])}
-            onCommit={(height) =>
-              changeLayer({
-                matrix: multiply(
-                  layer.matrix,
-                  scale(
-                    1,
-                    height /
-                      (layer.height *
-                        Math.hypot(layer.matrix[2], layer.matrix[3]))
-                  )
-                ),
-              })
-            }
-          />
-        </div>
+        <NumberField
+          label={t('resize.height')}
+          value={layer.height * Math.hypot(layer.matrix[2], layer.matrix[3])}
+          onCommit={(height) =>
+            changeLayer({
+              matrix: multiply(
+                layer.matrix,
+                scale(
+                  1,
+                  height /
+                    (layer.height *
+                      Math.hypot(layer.matrix[2], layer.matrix[3]))
+                )
+              ),
+            })
+          }
+        />
       </div>
-    ) : (
-      <p className="rie-help">{t('selection.hint')}</p>
-    );
+    </div>
+  ) : (
+    <p className="rie-help">{t('selection.hint')}</p>
+  );
   let controls: React.ReactNode = null;
   if (doc && tool === 'crop')
     controls = (
@@ -1111,7 +1392,7 @@ export function EditorUI({
           <Icon name="text" />
           {t('text.add')}
         </button>
-        {layer?.kind === 'text' ? (
+        {layer?.kind === 'text' && !isGroup ? (
           <>
             <label className="rie-label">
               <span>{t('text.content')}</span>
@@ -1197,12 +1478,59 @@ export function EditorUI({
             />
             {selectedControls}
           </>
-        ) : null}
+        ) : (
+          groupControls
+        )}
       </>
     );
   if (tool === 'shapes')
     controls = (
       <>
+        {pathState.drawing || pathState.editing || shape === 'path' ? (
+          <div className="rie-stack" data-testid="native-path-controls">
+            <div className="rie-row">
+              {pathState.drawing ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={!pathState.canFinish}
+                    onClick={() => surface.current?.finishPath()}
+                  >
+                    {t('path.finish')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!pathState.canClose}
+                    onClick={() => surface.current?.finishPath(true)}
+                  >
+                    {t('path.close')}
+                  </button>
+                  <button
+                    type="button"
+                    className="rie-icon-button"
+                    aria-label={t('toolbar.cancel')}
+                    title={t('toolbar.cancel')}
+                    onClick={() => surface.current?.cancel()}
+                  >
+                    <Icon name="close" />
+                  </button>
+                </>
+              ) : null}
+              {pathState.editing ? (
+                <button
+                  type="button"
+                  disabled={!pathState.canRemovePoint}
+                  onClick={() => surface.current?.deletePathPoint()}
+                >
+                  {t('path.delete_point')}
+                </button>
+              ) : null}
+            </div>
+            <p className="rie-help">
+              {t(pathState.editing ? 'path.edit_hint' : 'path.draw_hint')}
+            </p>
+          </div>
+        ) : null}
         <div className="rie-grid">
           {(['rectangle', 'ellipse', 'triangle', 'line', 'arrow'] as const).map(
             (kind) => (
@@ -1217,6 +1545,19 @@ export function EditorUI({
               </button>
             )
           )}
+          <button
+            type="button"
+            data-testid="native-shape-path"
+            aria-pressed={shape === 'path'}
+            onClick={() => {
+              surface.current?.finishPath();
+              setShape('path');
+              engine.select(null);
+            }}
+          >
+            <Icon name="path" />
+            {t('shapes.path')}
+          </button>
         </div>
         {selectedControls}
       </>
@@ -1500,14 +1841,39 @@ export function EditorUI({
         {doc?.layers.length ? (
           <div className="rie-layer-list">
             <h3>{t('selection.layers')}</h3>
+            <div className="rie-row">
+              <button
+                type="button"
+                aria-pressed={multiSelect}
+                onClick={() => setMultiSelect(!multiSelect)}
+              >
+                {t('selection.multiple')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  engine.selectMany(doc.layers.map((item) => item.id));
+                  setMultiSelect(true);
+                }}
+              >
+                {t('selection.all')}
+              </button>
+            </div>
             {[...doc.layers].reverse().map((item) => (
               <div className="rie-layer-row" key={item.id}>
                 <button
                   type="button"
                   key={item.id}
                   disabled={item.locked || item.hidden}
-                  aria-pressed={item.id === state.selected}
-                  onClick={() => engine.select(item.id)}
+                  aria-pressed={selectedIds.includes(item.id)}
+                  onClick={(event) =>
+                    multiSelect ||
+                    event.shiftKey ||
+                    event.ctrlKey ||
+                    event.metaKey
+                      ? engine.toggleSelection(item.id)
+                      : engine.select(item.id)
+                  }
                 >
                   <Icon
                     name={
@@ -1849,6 +2215,7 @@ export function EditorUI({
             engine={engine}
             doc={doc}
             selected={state.selected}
+            selectedIds={selectedIds}
             tool={tool}
             brush={brush}
             crop={crop}
@@ -1860,6 +2227,7 @@ export function EditorUI({
             onCropApply={closePanel}
             onCropCancel={cancelCrop}
             shape={shape}
+            onPathStateChange={setPathState}
             redaction={redaction}
             onImportImage={
               state.options.features?.imageEditor?.tools?.stickers === false
@@ -1881,16 +2249,20 @@ export function EditorUI({
             <span className="rie-original-label">{t('toolbar.original')}</span>
           ) : (
             <span className="rie-tool-hint">
-              {[
-                'crop',
-                'draw',
-                'text',
-                'shapes',
-                'redact',
-                'stickers',
-              ].includes(tool)
-                ? t(`${tool === 'text' ? 'text' : tool}.hint`)
-                : ''}
+              {pathState.editing
+                ? t('path.edit_hint')
+                : tool === 'shapes' && shape === 'path'
+                  ? t('path.draw_hint')
+                  : [
+                        'crop',
+                        'draw',
+                        'text',
+                        'shapes',
+                        'redact',
+                        'stickers',
+                      ].includes(tool)
+                    ? t(`${tool === 'text' ? 'text' : tool}.hint`)
+                    : ''}
             </span>
           )}
         </div>

@@ -46,9 +46,8 @@ it('renders on the server with every prop set', () => {
   ).not.toThrow();
 });
 
-// The 'use client' banner comes from tsup config, which nothing else
-// checks — a bundler or config change could silently drop it and every
-// existing test would still pass. dist/ exists in every CI job, because
+// The component's client directive must survive bundling. The pure document
+// entry deliberately has no directive. dist/ exists in every CI job, because
 // `pnpm install` runs the `prepare` script and that builds; the skip is only for
 // a local run before anyone has built.
 const dist = (file: string) => resolve(__dirname, '..', 'dist', file);
@@ -56,8 +55,8 @@ const built = existsSync(dist('index.mjs'));
 
 it.skipIf(!built)('ships the "use client" directive in both builds', () => {
   for (const file of ['index.js', 'index.mjs']) {
-    expect(readFileSync(dist(file), 'utf8').startsWith("'use client';")).toBe(
-      true
+    expect(readFileSync(dist(file), 'utf8').slice(0, 100)).toMatch(
+      /^(?:["']use strict["'];\s*)?["']use client["'];/
     );
   }
 });

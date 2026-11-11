@@ -3,6 +3,7 @@ import {
   ImageDocument,
   Layer,
   layerCorners,
+  Matrix,
   multiply,
   Point,
   Rect,
@@ -129,11 +130,12 @@ export function snapMove(
   layer: Layer,
   delta: Point,
   threshold: number,
-  axis?: 'x' | 'y'
+  axis?: 'x' | 'y',
+  excludedIds: readonly string[] = [layer.id]
 ): { delta: Point; guides: SnapGuide[] } {
   const bounds = layerBounds(layer);
   const peers = doc.layers.filter(
-    (p) => p.id !== layer.id && !p.hidden && !p.erase && p.opacity > 0
+    (p) => !excludedIds.includes(p.id) && !p.hidden && !p.erase && p.opacity > 0
   );
   const targets = {
     x: [doc.width / 2, 0, doc.width],
@@ -231,4 +233,240 @@ export function resizeCursor(corners: Point[], corner: number): string {
     ((Math.round(Math.atan2(p.y - c.y, p.x - c.x) / (Math.PI / 4)) % 4) + 4) %
     4;
   return ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][index];
+}
+
+export function selectedLayers(
+  doc: ImageDocument,
+  ids: readonly string[]
+): Layer[] {
+  const selected = new Set(ids);
+  return doc.layers.filter(
+    (layer) => selected.has(layer.id) && !layer.hidden && !layer.locked
+  );
+}
+
+export function selectionBounds(
+  doc: ImageDocument,
+  ids: readonly string[]
+): Rect | null {
+  const layers = selectedLayers(doc, ids);
+  if (!layers.length) return null;
+  const bounds = layers.map(layerBounds),
+    x = Math.min(...bounds.map((r) => r.x)),
+    y = Math.min(...bounds.map((r) => r.y));
+  return {
+    x,
+    y,
+    width: Math.max(0.001, Math.max(...bounds.map((r) => r.x + r.width)) - x),
+    height: Math.max(0.001, Math.max(...bounds.map((r) => r.y + r.height)) - y),
+  };
+}
+
+/** A temporary coordinate frame for a selection; never stored in the document. */
+export function selectionFrame(
+  doc: ImageDocument,
+  ids: readonly string[]
+): Layer | null {
+  const bounds = selectionBounds(doc, ids);
+  return bounds
+    ? {
+        id: '__selection__',
+        kind: 'rectangle',
+        matrix: translate(bounds.x, bounds.y),
+        width: bounds.width,
+        height: bounds.height,
+        color: 'transparent',
+        fill: 'transparent',
+        strokeWidth: 0,
+        opacity: 1,
+      }
+    : null;
+}
+
+/** Premultiplication applies the same document-space gesture to every existing affine frame. */
+export function transformLayers(
+  doc: ImageDocument,
+  ids: readonly string[],
+  matrix: Matrix
+): ImageDocument {
+  const selected = new Set(selectedLayers(doc, ids).map((layer) => layer.id));
+  if (!selected.size) return doc;
+  return {
+    ...doc,
+    layers: doc.layers.map((layer) =>
+      selected.has(layer.id)
+        ? { ...layer, matrix: multiply(matrix, layer.matrix) }
+        : layer
+    ),
+  };
+}
+
+export function duplicateLayers(
+  doc: ImageDocument,
+  ids: readonly string[]
+): { document: ImageDocument; ids: string[] } {
+  const copies = selectedLayers(doc, ids).map((layer) => ({
+    ...layer,
+    id: crypto.randomUUID(),
+    matrix: multiply(translate(12, 12), layer.matrix),
+  }));
+  return {
+    document: copies.length
+      ? { ...doc, layers: [...doc.layers, ...copies] }
+      : doc,
+    ids: copies.map((layer) => layer.id),
+  };
+}
+
+export type Alignment =
+  'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom';
+export function alignLayers(
+  doc: ImageDocument,
+  ids: readonly string[],
+  alignment: Alignment
+): ImageDocument {
+  const layers = selectedLayers(doc, ids),
+    bounds =
+      layers.length > 1
+        ? selectionBounds(doc, ids)
+        : { x: 0, y: 0, width: doc.width, height: doc.height };
+  if (!bounds || !layers.length) return doc;
+  const horizontal = ['left', 'center', 'right'].includes(alignment),
+    axis = horizontal ? 'x' : 'y',
+    size = horizontal ? 'width' : 'height',
+    fraction = ['center', 'middle'].includes(alignment)
+      ? 0.5
+      : ['right', 'bottom'].includes(alignment)
+        ? 1
+        : 0;
+  const selected = new Set(layers.map((layer) => layer.id));
+  return {
+    ...doc,
+    layers: doc.layers.map((layer) => {
+      if (!selected.has(layer.id)) return layer;
+      const box = layerBounds(layer),
+        delta =
+          bounds[axis] +
+          bounds[size] * fraction -
+          box[axis] -
+          box[size] * fraction;
+      return {
+        ...layer,
+        matrix: multiply(
+          translate(horizontal ? delta : 0, horizontal ? 0 : delta),
+          layer.matrix
+        ),
+      };
+    }),
+  };
+}
+
+export function distributeLayers(
+  doc: ImageDocument,
+  ids: readonly string[],
+  direction: 'horizontal' | 'vertical'
+): ImageDocument {
+  const axis = direction === 'horizontal' ? 'x' : 'y',
+    size = direction === 'horizontal' ? 'width' : 'height',
+    layers = selectedLayers(doc, ids)
+      .map((layer) => ({ layer, bounds: layerBounds(layer) }))
+      .sort((a, b) => a.bounds[axis] - b.bounds[axis]);
+  if (layers.length < 3) return doc;
+  const first = layers[0].bounds,
+    last = layers[layers.length - 1].bounds,
+    gap =
+      (last[axis] +
+        last[size] -
+        first[axis] -
+        layers.reduce((sum, item) => sum + item.bounds[size], 0)) /
+      (layers.length - 1),
+    positions = new Map<string, number>();
+  let cursor = first[axis];
+  for (const item of layers) {
+    positions.set(item.layer.id, cursor - item.bounds[axis]);
+    cursor += item.bounds[size] + gap;
+  }
+  return {
+    ...doc,
+    layers: doc.layers.map((layer) => {
+      const delta = positions.get(layer.id);
+      return delta === undefined
+        ? layer
+        : {
+            ...layer,
+            matrix: multiply(
+              translate(axis === 'x' ? delta : 0, axis === 'y' ? delta : 0),
+              layer.matrix
+            ),
+          };
+    }),
+  };
+}
+
+export function marqueeLayers(doc: ImageDocument, rect: Rect): string[] {
+  return doc.layers
+    .filter((layer) => {
+      if (layer.hidden || layer.locked || layer.erase || layer.opacity <= 0)
+        return false;
+      const bounds = layerBounds(layer);
+      return (
+        bounds.x <= rect.x + rect.width &&
+        bounds.x + bounds.width >= rect.x &&
+        bounds.y <= rect.y + rect.height &&
+        bounds.y + bounds.height >= rect.y
+      );
+    })
+    .map((layer) => layer.id);
+}
+
+export function rectFromPoints(a: Point, b: Point): Rect {
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    width: Math.abs(a.x - b.x),
+    height: Math.abs(a.y - b.y),
+  };
+}
+
+/** Normalize path bounds while retaining every point's document position under shear/flip. */
+export function withPathPoints(layer: Layer, points: readonly Point[]): Layer {
+  if (!points.length) return layer;
+  const x = Math.min(...points.map((p) => p.x)),
+    y = Math.min(...points.map((p) => p.y)),
+    width = Math.max(0.001, Math.max(...points.map((p) => p.x)) - x),
+    height = Math.max(0.001, Math.max(...points.map((p) => p.y)) - y);
+  return {
+    ...layer,
+    width,
+    height,
+    matrix: multiply(layer.matrix, translate(x, y)),
+    points: points.map((p) => ({ x: p.x - x, y: p.y - y })),
+  };
+}
+
+export function snapPathPoint(anchor: Point, point: Point): Point {
+  const length = distance(anchor, point),
+    angle =
+      (Math.round(
+        Math.atan2(point.y - anchor.y, point.x - anchor.x) / (Math.PI / 4)
+      ) *
+        Math.PI) /
+      4;
+  return {
+    x: anchor.x + Math.cos(angle) * length,
+    y: anchor.y + Math.sin(angle) * length,
+  };
+}
+
+export function pathNodes(layer: Layer): Point[] {
+  return (layer.points ?? []).map((point) => transform(layer.matrix, point));
+}
+
+export function pathSegments(layer: Layer): { index: number; point: Point }[] {
+  const points = pathNodes(layer),
+    count = layer.pathClosed ? points.length : points.length - 1;
+  return Array.from({ length: Math.max(0, count) }, (_, index) => ({
+    index: index + 1,
+    point: midpoint(points[index], points[(index + 1) % points.length]),
+  }));
 }
