@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 import { CanvasEngine, LoadedImage } from '../src/engine';
 import { cropDocument, pathLayer, resizeDocument } from '../src/model';
+import { exportCanvas } from '../src/render';
 
 vi.mock('../src/render', () => ({
   exportCanvas: vi.fn((doc: { width: number; height: number }) => ({
@@ -251,4 +252,337 @@ it('removes only the selected layer and supports clean subscriber teardown', asy
   const calls = changed.mock.calls.length;
   engine.undo();
   expect(changed).toHaveBeenCalledTimes(calls);
+});
+
+it('editable snapshots finalize pending UI edits and do not expose live document references', async () => {
+  const engine = await ready(),
+    original = engine.getSnapshot().document!;
+  engine.beforeExport(() =>
+    engine.commit(cropDocument(original, { x: 2, y: 3, width: 40, height: 30 }))
+  );
+  const doc = engine.getDocument()!;
+  expect(doc).toMatchObject({ width: 40, height: 30 });
+  doc.effects.brightness = 50;
+  expect(engine.getSnapshot().document!.effects.brightness).toBe(0);
+  engine.undo();
+  expect(engine.getSnapshot().document).toBe(original);
+});
+
+it('restoring editable state is one undoable change and invalid state preserves pending crop ownership', async () => {
+  const engine = await ready(),
+    original = engine.getDocument()!,
+    restored = resizeDocument(original, 40, 24),
+    change = vi.fn();
+  engine.subscribeChanges(change);
+  await engine.restoreDocument(JSON.stringify(restored));
+  expect(engine.getSnapshot().document).toEqual(restored);
+  expect(change).toHaveBeenCalledTimes(1);
+  engine.undo();
+  expect(engine.getSnapshot().document).toEqual(original);
+  engine.beforeExport(() =>
+    engine.commit(cropDocument(original, { x: 0, y: 0, width: 20, height: 20 }))
+  );
+  await expect(engine.restoreDocument('{bad')).rejects.toThrow();
+  expect(engine.getDocument()).toMatchObject({ width: 20, height: 20 });
+});
+
+it('a failed restored sticker keeps the existing document, selection and history intact', async () => {
+  const loader = vi
+      .fn()
+      .mockResolvedValueOnce(image())
+      .mockRejectedValueOnce(new Error('sticker failed')),
+    engine = new CanvasEngine(loader);
+  await engine.reset('base');
+  const layer = pathLayer([{ x: 1, y: 1 }]),
+    doc = { ...engine.getSnapshot().document!, layers: [layer] };
+  engine.commit(doc);
+  engine.select(layer.id);
+  await expect(
+    engine.restoreDocument({
+      ...doc,
+      layers: [
+        { ...layer, kind: 'image', imageSource: 'data:image/png;base64,AA==' },
+      ],
+    })
+  ).rejects.toThrow('sticker failed');
+  expect(engine.getSnapshot()).toMatchObject({
+    document: doc,
+    selected: layer.id,
+    canUndo: true,
+  });
+  expect(engine.assets.size).toBe(0);
+});
+
+it('new image resets and later edits cannot be overwritten by delayed document restoration', async () => {
+  const pending = deferred<LoadedImage>(),
+    loader = vi
+      .fn()
+      .mockResolvedValueOnce(image())
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(image(200, 150)),
+    engine = new CanvasEngine(loader);
+  await engine.reset('base');
+  const doc = engine.getDocument()!,
+    restore = engine
+      .restoreDocument({
+        ...doc,
+        layers: [
+          {
+            ...pathLayer([]),
+            kind: 'image',
+            imageSource: 'data:image/png;base64,AA==',
+          },
+        ],
+      })
+      .catch((error) => error);
+  await engine.reset('replacement');
+  pending.resolve(image(20, 10));
+  expect((await restore).name).toBe('AbortError');
+  expect(engine.getSnapshot().document).toMatchObject({
+    width: 200,
+    height: 150,
+    layers: [],
+  });
+  expect(engine.assets.size).toBe(0);
+});
+
+it('later document restoration wins even when an earlier sticker loader ignores abort', async () => {
+  const pending = deferred<LoadedImage>(),
+    loader = vi
+      .fn()
+      .mockResolvedValueOnce(image())
+      .mockReturnValueOnce(pending.promise),
+    engine = new CanvasEngine(loader);
+  await engine.reset('base');
+  const doc = engine.getDocument()!,
+    first = engine
+      .restoreDocument({
+        ...doc,
+        layers: [
+          {
+            ...pathLayer([]),
+            kind: 'image',
+            imageSource: 'data:image/png;base64,AA==',
+          },
+        ],
+      })
+      .catch((error) => error);
+  await engine.restoreDocument(resizeDocument(doc, 20, 12));
+  pending.resolve(image(10, 10));
+  expect((await first).name).toBe('AbortError');
+  expect(engine.getSnapshot().document).toMatchObject({
+    width: 20,
+    height: 12,
+  });
+});
+
+it('reverting uses the owned baseline without reloading and undo recovers the complete draft', async () => {
+  const engine = await ready(),
+    original = engine.getSnapshot().document!,
+    edited = resizeDocument(original, 30, 20);
+  engine.commit(edited);
+  engine.revert();
+  expect(engine.getSnapshot().document).toBe(original);
+  expect(engine.hasChanges()).toBe(false);
+  engine.undo();
+  expect(engine.getSnapshot().document).toBe(edited);
+});
+
+it('output options are merged at export and encoded quality is validated without changing the document', async () => {
+  const engine = await ready(),
+    doc = engine.getSnapshot().document!;
+  engine.updateOptions({ export: { type: 'image/webp', quality: 0.8 } });
+  engine.getImage({ width: 50 });
+  expect(exportCanvas).toHaveBeenLastCalledWith(
+    doc,
+    engine.getSource(),
+    { type: 'image/webp', quality: 0.8, width: 50 },
+    engine.assets
+  );
+  await engine.getBlob({ type: 'image/jpeg', background: '#fff' });
+  expect(exportCanvas).toHaveBeenLastCalledWith(
+    doc,
+    engine.getSource(),
+    { type: 'image/jpeg', quality: 0.8, background: '#fff' },
+    engine.assets
+  );
+  expect(() => engine.getImage({ quality: 2 })).toThrow('quality');
+  expect(engine.getSnapshot().document).toBe(doc);
+  expect(engine.hasChanges()).toBe(false);
+});
+
+it('invalid export settings leave pending UI work untouched and undefined format retains the default', async () => {
+  const engine = await ready(),
+    original = engine.getSnapshot().document!,
+    finalize = vi.fn(() => engine.commit(resizeDocument(original, 20, 12)));
+  engine.beforeExport(finalize);
+  for (const options of [
+    { width: NaN },
+    { height: 0 },
+    { width: 8193 },
+    { quality: -0.1 },
+  ])
+    expect(() => engine.getImage(options)).toThrow();
+  expect(finalize).not.toHaveBeenCalled();
+  expect(engine.getSnapshot().document).toBe(original);
+  engine.getImage({ type: undefined });
+  expect(finalize).toHaveBeenCalledTimes(1);
+  expect(exportCanvas).toHaveBeenLastCalledWith(
+    expect.objectContaining({ width: 20, height: 12 }),
+    engine.getSource(),
+    { type: 'image/png' },
+    engine.assets
+  );
+});
+
+it('custom loaders keep abort ownership and locked or hidden layers cannot become a gesture selection', async () => {
+  const engine = new CanvasEngine(),
+    loader = vi.fn(async () => image());
+  engine.updateOptions({ imageLoader: loader });
+  await engine.reset('custom');
+  expect(loader).toHaveBeenCalledWith('custom', expect.any(AbortSignal));
+  const locked = { ...pathLayer([]), locked: true },
+    hidden = { ...pathLayer([]), hidden: true };
+  engine.commit({
+    ...engine.getSnapshot().document!,
+    layers: [locked, hidden],
+  });
+  engine.select(locked.id);
+  expect(engine.getSnapshot().selected).toBeNull();
+  engine.select(hidden.id);
+  expect(engine.getSnapshot().selected).toBeNull();
+});
+
+it('sticker import owns an embedded raster and retains its resource across undo and redo', async () => {
+  const raster = { drawImage: vi.fn() } as unknown as CanvasRenderingContext2D,
+    getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(raster),
+    toDataURL = vi
+      .spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+      .mockReturnValue('data:image/png;base64,AA==');
+  try {
+    const engine = await ready(),
+      original = engine.getSnapshot().document!,
+      change = vi.fn();
+    engine.subscribeChanges(change);
+    await engine.addImage('blob:temporary');
+    const layer = engine.getSnapshot().document!.layers[0];
+    expect(layer).toMatchObject({
+      kind: 'image',
+      imageSource: 'data:image/png;base64,AA==',
+      width: 60,
+      height: 36,
+      matrix: [1, 0, 0, 1, 20, 12],
+    });
+    expect(toDataURL).toHaveBeenCalledWith('image/png');
+    expect(raster.drawImage).toHaveBeenCalledWith(
+      engine.getSource(),
+      0,
+      0,
+      100,
+      60
+    );
+    expect(engine.getSnapshot().selected).toBe(layer.id);
+    expect(engine.assets.get(layer.imageSource!)).toBeInstanceOf(
+      HTMLCanvasElement
+    );
+    expect(change).toHaveBeenCalledTimes(1);
+    engine.undo();
+    expect(engine.getSnapshot().document).toBe(original);
+    expect(engine.hasChanges()).toBe(false);
+    engine.redo();
+    expect(engine.getDocument()!.layers[0]).toMatchObject(layer);
+    expect(engine.assets.size).toBe(1);
+    engine.destroy();
+    expect(engine.assets.size).toBe(0);
+    expect(engine.getSource()).toBeNull();
+  } finally {
+    getContext.mockRestore();
+    toDataURL.mockRestore();
+  }
+});
+
+it('failed sticker loading or raster encoding never changes an existing draft', async () => {
+  const loader = vi
+      .fn()
+      .mockResolvedValueOnce(image())
+      .mockRejectedValueOnce(new Error('decode failed'))
+      .mockResolvedValueOnce(image()),
+    engine = new CanvasEngine(loader);
+  await engine.reset('base');
+  const layer = pathLayer([]),
+    doc = { ...engine.getSnapshot().document!, layers: [layer] };
+  engine.commit(doc);
+  engine.select(layer.id);
+  await expect(engine.addImage('broken')).rejects.toThrow('decode failed');
+  const getContext = vi
+    .spyOn(HTMLCanvasElement.prototype, 'getContext')
+    .mockReturnValue(null);
+  try {
+    await expect(engine.addImage('missing canvas')).rejects.toThrow('Canvas2D');
+    expect(engine.getSnapshot()).toMatchObject({
+      document: doc,
+      selected: layer.id,
+      canUndo: true,
+    });
+    expect(engine.assets.size).toBe(0);
+  } finally {
+    getContext.mockRestore();
+  }
+});
+
+it('an asynchronous sticker cannot land on a newer source even when its loader ignores abort', async () => {
+  const pending = deferred<LoadedImage>(),
+    loader = vi
+      .fn()
+      .mockResolvedValueOnce(image())
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(image(200, 100)),
+    engine = new CanvasEngine(loader);
+  await engine.reset('first');
+  const imported = engine.addImage('slow sticker').catch((error) => error);
+  await engine.reset('replacement');
+  pending.resolve(image(10, 10));
+  expect((await imported).name).toBe('AbortError');
+  expect(engine.getSnapshot().document).toMatchObject({
+    width: 200,
+    height: 100,
+    layers: [],
+  });
+  expect(engine.assets.size).toBe(0);
+});
+
+it('restoration reuses already owned sticker resources and exports fail cleanly before readiness', async () => {
+  const loader = vi.fn(async () => image()),
+    engine = new CanvasEngine(loader);
+  await expect(engine.restoreDocument('{}')).rejects.toThrow('not ready');
+  await expect(engine.addImage('sticker')).rejects.toThrow('not ready');
+  await expect(engine.getBlob()).rejects.toThrow('not ready');
+  expect(engine.getDocument()).toBeNull();
+  engine.revert();
+  await engine.reset('base');
+  const source = 'data:image/png;base64,AA==',
+    resource = {} as CanvasImageSource;
+  engine.assets.set(source, resource);
+  await engine.restoreDocument({
+    ...engine.getDocument()!,
+    layers: [{ ...pathLayer([]), kind: 'image', imageSource: source }],
+  });
+  expect(loader).toHaveBeenCalledTimes(1);
+  expect(engine.assets.get(source)).toBe(resource);
+});
+
+it('unsupported encoders and an encoding failure preserve document history', async () => {
+  const engine = await ready(),
+    doc = engine.getSnapshot().document!;
+  expect(() =>
+    Reflect.apply(engine.getImage, engine, [{ type: 'image/gif' }])
+  ).toThrow('Unsupported image format');
+  vi.mocked(exportCanvas).mockReturnValueOnce({
+    toBlob: (callback: BlobCallback) => callback(null),
+  } as HTMLCanvasElement);
+  await expect(engine.getBlob()).rejects.toThrow('Image export failed');
+  expect(engine.getSnapshot().document).toBe(doc);
+  expect(engine.hasChanges()).toBe(false);
 });

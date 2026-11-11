@@ -1,6 +1,8 @@
 import React, { useRef } from 'react';
 
 import type { ImageEditorLocale } from '@lofcz/react-image-editor';
+import { translator } from '../../src/locale';
+import { demoCopy } from './copy';
 
 export const TOOL_NAMES = [
   'crop',
@@ -10,6 +12,11 @@ export const TOOL_NAMES = [
   'text',
   'shapes',
   'select',
+  'adjust',
+  'stickers',
+  'redact',
+  'frame',
+  'fill',
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -38,14 +45,16 @@ interface SidebarProps {
 
 export default function Sidebar(props: SidebarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const t = demoCopy(props.locale),
+    editorText = translator({ locale: props.locale });
 
   return (
     <aside className="sidebar">
       <section className="section">
-        <h2 className="section-label">Actions</h2>
-        <button onClick={props.onChangeImage}>Change image</button>
+        <h2 className="section-label">{t('actions')}</h2>
+        <button onClick={props.onChangeImage}>{t('change_image')}</button>
         <button onClick={() => fileInputRef.current?.click()}>
-          Upload image…
+          {t('upload')}
         </button>
         <input
           ref={fileInputRef}
@@ -60,26 +69,26 @@ export default function Sidebar(props: SidebarProps) {
             if (file) props.onUploadImage(file);
           }}
         />
-        <button onClick={props.onCheckChanges}>Has changes?</button>
-        <button onClick={props.onSnapshot}>Snapshot</button>
+        <button onClick={props.onCheckChanges}>{t('check_changes')}</button>
+        <button onClick={props.onSnapshot}>{t('preview')}</button>
       </section>
 
       <section className="section">
-        <h2 className="section-label">Options (live)</h2>
+        <h2 className="section-label">{t('appearance')}</h2>
         <label className="field">
-          Theme
+          {t('theme')}
           <select
             value={props.theme}
             onChange={(event) =>
               props.onThemeChange(event.target.value as 'light' | 'dark')
             }
           >
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
+            <option value="light">{t('light')}</option>
+            <option value="dark">{t('dark')}</option>
           </select>
         </label>
         <label className="field">
-          Locale
+          {t('language')}
           <select
             value={props.locale}
             onChange={(event) =>
@@ -96,23 +105,23 @@ export default function Sidebar(props: SidebarProps) {
       </section>
 
       <section className="section">
-        <h2 className="section-label">Dock (remounts editor)</h2>
+        <h2 className="section-label">{t('layout')}</h2>
         <label className="field">
-          Toolbar position
+          {t('position')}
           <select
             value={props.dock}
             onChange={(event) =>
               props.onDockChange(event.target.value as 'left' | 'right')
             }
           >
-            <option value="left">Left</option>
-            <option value="right">Right</option>
+            <option value="left">{t('left')}</option>
+            <option value="right">{t('right')}</option>
           </select>
         </label>
       </section>
 
       <section className="section">
-        <h2 className="section-label">Tools (remounts editor)</h2>
+        <h2 className="section-label">{t('tools')}</h2>
         <div className="tool-grid">
           {TOOL_NAMES.map((tool) => (
             <label key={tool} className="tool-toggle">
@@ -121,7 +130,7 @@ export default function Sidebar(props: SidebarProps) {
                 checked={props.tools[tool]}
                 onChange={() => props.onToolToggle(tool)}
               />
-              {tool}
+              {editorText(`tools.${tool}`)}
             </label>
           ))}
         </div>

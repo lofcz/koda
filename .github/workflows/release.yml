@@ -35,7 +35,7 @@ jobs:
       - run: pnpm exec playwright install --only-shell chromium
         timeout-minutes: 5
       - run: pnpm run test:browser
-        timeout-minutes: 5
+        timeout-minutes: 10
       - name: Bump and commit release
         id: release
         env:

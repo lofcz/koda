@@ -43,8 +43,11 @@ function ImageEditorInner(
   }, [engine]);
   const optionsKey = stableKey(props.options ?? {});
   useEffect(() => {
-    engine.updateOptions(latest.current.options ?? {});
-  }, [engine, optionsKey]);
+    engine.updateOptions({
+      ...latest.current.options,
+      imageLoader: latest.current.options?.imageLoader,
+    });
+  }, [engine, optionsKey, props.options?.imageLoader]);
   useEffect(
     () =>
       engine.subscribeChanges((change) => {

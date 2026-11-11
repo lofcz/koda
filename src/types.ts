@@ -1,8 +1,49 @@
 import type { CSSProperties, ReactNode } from 'react';
+import type { ImageDocument } from './model';
+export type {
+  ImageDocument,
+  Layer,
+  Effects,
+  Frame,
+  Matrix,
+  Point,
+  Rect,
+  LineEnd,
+} from './model';
 export type ImageEditorLocale = 'en' | 'cs' | 'sk' | 'pl' | (string & {});
 export type ImageEditorTranslations = Record<string, Record<string, string>>;
 export type EditorTool =
-  'select' | 'crop' | 'resize' | 'draw' | 'text' | 'shapes' | 'filter';
+  | 'select'
+  | 'crop'
+  | 'resize'
+  | 'draw'
+  | 'text'
+  | 'shapes'
+  | 'filter'
+  | 'adjust'
+  | 'stickers'
+  | 'frame'
+  | 'fill'
+  | 'redact';
+export interface ImageExportOptions {
+  /** Defaults to PNG, preserving transparency. JPEG defaults to a white background. */
+  type?: 'image/png' | 'image/jpeg' | 'image/webp';
+  /** Lossy encoder quality from 0 to 1. Ignored by PNG. */
+  quality?: number;
+  /** Omitting either dimension preserves the document aspect ratio. */
+  width?: number;
+  height?: number;
+  background?: string;
+}
+export interface ImageEditorLoadedImage {
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+}
+export type ImageEditorImageLoader = (
+  url: string,
+  signal: AbortSignal
+) => Promise<ImageEditorLoadedImage>;
 export interface ImageEditorSaveResult {
   dataUrl: string;
   blob: Blob;
@@ -19,6 +60,10 @@ export interface ImageEditorOptions {
   translations?: ImageEditorTranslations;
   /** Hide Save/Cancel when the host owns persistence. Defaults to true. */
   showActions?: boolean;
+  /** Default encoding options used by Save, getImage and getBlob. */
+  export?: ImageExportOptions;
+  /** A loader must return origin-clean pixels; aborted loads may never replace the current draft. */
+  imageLoader?: ImageEditorImageLoader;
   features?: {
     imageEditor?: {
       dock?: 'left' | 'right';
@@ -48,9 +93,19 @@ export interface MountOptions extends ImageEditorOptions {
 }
 export interface ImageEditorInstance {
   destroy(): void;
-  /** PNG at document pixel dimensions, with alpha and without selection/UI chrome. */
-  getImage(): string | null;
-  getBlob(): Promise<Blob>;
+  /** Exports pixels without selection/UI chrome. Pending crop and text edits are committed first. */
+  getImage(options?: ImageExportOptions): string | null;
+  getBlob(options?: ImageExportOptions): Promise<Blob>;
+  /** Independent JSON-safe editable state; the host owns the original image source separately. */
+  getDocument(): ImageDocument | null;
+  /** Restores state against the currently loaded original image; failure preserves the draft. */
+  restoreDocument(document: ImageDocument | string): Promise<void>;
+  /** Import an image as an editable, embedded layer. */
+  addImage(url: string): Promise<void>;
+  /** Original loaded pixels for thumbnails and comparison. */
+  getSource(): CanvasImageSource | null;
+  /** Restore the original document as one undoable edit, without reloading the source. */
+  revert(): void;
   hasChanges(): boolean;
   /** Presentation changes do not reset the document or its history. */
   updateOptions(options: Partial<MountOptions>): void;

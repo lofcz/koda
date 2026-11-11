@@ -1,23 +1,26 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const port = Number(process.env.EDITOR_TEST_PORT ?? 4198),
   base = `http://127.0.0.1:${port}`;
 const server = spawn(
-  'pnpm',
+  process.execPath,
   [
-    '--dir',
-    'demo',
-    'exec',
-    'vite',
+    fileURLToPath(
+      new URL('../demo/node_modules/vite/bin/vite.js', import.meta.url)
+    ),
     '--host',
     '127.0.0.1',
     '--port',
     String(port),
     '--strictPort',
   ],
-  { stdio: ['ignore', 'pipe', 'pipe'] }
+  {
+    cwd: fileURLToPath(new URL('../demo', import.meta.url)),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }
 );
 let serverLog = '';
 server.stdout.on('data', (chunk) => {

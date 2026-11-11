@@ -1,20 +1,23 @@
-import { createDocument, DocumentHistory, ImageDocument } from './model';
+import {
+  createDocument,
+  dimensions,
+  DocumentHistory,
+  ImageDocument,
+  parseDocument,
+  translate,
+} from './model';
 import { exportCanvas } from './render';
 import type {
   ImageEditorChange,
   ImageEditorInstance,
   ImageEditorOptions,
   MountOptions,
+  ImageExportOptions,
+  ImageEditorLoadedImage,
+  ImageEditorImageLoader,
 } from './types';
-export type LoadedImage = {
-  source: CanvasImageSource;
-  width: number;
-  height: number;
-};
-export type ImageLoader = (
-  url: string,
-  signal: AbortSignal
-) => Promise<LoadedImage>;
+export type LoadedImage = ImageEditorLoadedImage;
+export type ImageLoader = ImageEditorImageLoader;
 export type EngineState = {
   phase: 'idle' | 'loading' | 'ready' | 'error' | 'destroyed';
   document: ImageDocument | null;
@@ -105,6 +108,10 @@ export class CanvasEngine implements ImageEditorInstance {
   private loadedUrl = '';
   private exportFinalizer: (() => void) | null = null;
   private history: DocumentHistory | null = null;
+  private restoreGeneration = 0;
+  private assetControllers = new Set<AbortController>();
+  /** Decoded image layers are owned by the engine; documents only contain serializable sources. */
+  assets = new Map<string, CanvasImageSource>();
   image: LoadedImage | null = null;
   constructor(private loader: ImageLoader = loadImage) {}
   getSnapshot = () => this.state;
@@ -149,6 +156,9 @@ export class CanvasEngine implements ImageEditorInstance {
     this.generation++;
     this.controller?.abort();
     this.controller = null;
+    this.assetControllers.forEach((controller) => controller.abort());
+    this.assetControllers.clear();
+    this.assets = new Map();
     this.exportFinalizer = null;
     this.image = null;
     this.history = null;
@@ -184,11 +194,17 @@ export class CanvasEngine implements ImageEditorInstance {
     this.url = url;
     this.emit({ phase: 'loading', error: null });
     try {
-      const image = await this.loader(url, controller.signal);
+      const image = await (this.state.options.imageLoader ?? this.loader)(
+        url,
+        controller.signal
+      );
       if (generation !== this.generation || controller.signal.aborted)
         throw abortError();
       const doc = createDocument(image.width, image.height);
       this.image = image;
+      this.assetControllers.forEach((pending) => pending.abort());
+      this.assetControllers.clear();
+      this.assets = new Map();
       this.loadedUrl = url;
       this.imageKey++;
       this.exportFinalizer = null;
@@ -232,38 +248,202 @@ export class CanvasEngine implements ImageEditorInstance {
         /* Failure is exposed in state and the component callback. */
       });
   }
-  getImage() {
+  private outputOptions(options: ImageExportOptions = {}): ImageExportOptions {
+    const output = {
+      ...this.state.options.export,
+      ...options,
+      type: options.type ?? this.state.options.export?.type ?? 'image/png',
+    };
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(output.type))
+      throw new Error('Unsupported image format');
+    if (
+      output.quality !== undefined &&
+      (!Number.isFinite(output.quality) ||
+        output.quality < 0 ||
+        output.quality > 1)
+    )
+      throw new Error('Invalid image quality');
+    // Validate supplied dimensions before an export can finalize pending UI edits.
+    dimensions(output.width ?? 1, output.height ?? 1);
+    return output;
+  }
+  getImage(options?: ImageExportOptions) {
     if (this.state.phase !== 'ready') return null;
+    const output = this.outputOptions(options);
     this.flush();
     return this.history && this.image
-      ? exportCanvas(this.history.current, this.image.source).toDataURL(
-          'image/png'
-        )
+      ? exportCanvas(
+          this.history.current,
+          this.image.source,
+          output,
+          this.assets
+        ).toDataURL(output.type, output.quality)
       : null;
   }
-  async getBlob(): Promise<Blob> {
+  async getBlob(options?: ImageExportOptions): Promise<Blob> {
     if (this.state.phase !== 'ready' || !this.history || !this.image)
       throw new Error('Editor is not ready');
+    const output = this.outputOptions(options);
     this.flush();
-    const canvas = exportCanvas(this.history.current, this.image.source);
+    const canvas = exportCanvas(
+      this.history.current,
+      this.image.source,
+      output,
+      this.assets
+    );
     return new Promise((resolve, reject) =>
       canvas.toBlob(
         (blob) =>
-          blob ? resolve(blob) : reject(new Error('PNG export failed')),
-        'image/png'
+          blob ? resolve(blob) : reject(new Error('Image export failed')),
+        output.type,
+        output.quality
       )
     );
+  }
+  getSource() {
+    return this.image?.source ?? null;
+  }
+  getDocument() {
+    if (this.state.phase !== 'ready' || !this.history) return null;
+    this.flush();
+    return parseDocument(this.history.current);
+  }
+  async restoreDocument(input: ImageDocument | string): Promise<void> {
+    if (this.state.phase !== 'ready' || !this.history)
+      throw new Error('Editor is not ready');
+    const doc = parseDocument(input),
+      generation = this.generation,
+      restoreGeneration = ++this.restoreGeneration,
+      revision = this.state.revision,
+      controller = new AbortController(),
+      sources = [
+        ...new Set(
+          doc.layers
+            .filter((layer) => layer.kind === 'image')
+            .map((layer) => layer.imageSource!)
+        ),
+      ],
+      assets = new Map(this.assets);
+    this.assetControllers.add(controller);
+    try {
+      await Promise.all(
+        sources.map(async (source) => {
+          if (assets.has(source)) return;
+          const image = await (this.state.options.imageLoader ?? this.loader)(
+            source,
+            controller.signal
+          );
+          dimensions(image.width, image.height);
+          assets.set(source, image.source);
+        })
+      );
+      if (
+        generation !== this.generation ||
+        restoreGeneration !== this.restoreGeneration ||
+        revision !== this.state.revision ||
+        controller.signal.aborted ||
+        this.state.phase !== 'ready'
+      )
+        throw abortError();
+      this.exportFinalizer = null;
+      this.history.cancel();
+      this.assets = assets;
+      this.commit(doc);
+      this.select(null);
+    } finally {
+      controller.abort();
+      this.assetControllers.delete(controller);
+    }
+  }
+  async addImage(url: string): Promise<void> {
+    if (this.state.phase !== 'ready' || !this.history)
+      throw new Error('Editor is not ready');
+    const generation = this.generation,
+      controller = new AbortController();
+    this.assetControllers.add(controller);
+    try {
+      const image = await (this.state.options.imageLoader ?? this.loader)(
+          url,
+          controller.signal
+        ),
+        size = dimensions(image.width, image.height);
+      if (
+        generation !== this.generation ||
+        controller.signal.aborted ||
+        this.state.phase !== 'ready'
+      )
+        throw abortError();
+      // Embed a raster snapshot so saved documents never depend on revoked blob URLs.
+      const canvas = document.createElement('canvas');
+      canvas.width = size.width;
+      canvas.height = size.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Canvas2D is unavailable');
+      ctx.drawImage(image.source, 0, 0, size.width, size.height);
+      const imageSource = canvas.toDataURL('image/png'),
+        doc = this.history.current,
+        factor = Math.min(
+          1,
+          (doc.width * 0.6) / size.width,
+          (doc.height * 0.6) / size.height
+        ),
+        width = size.width * factor,
+        height = size.height * factor,
+        id = crypto.randomUUID();
+      this.assets.set(imageSource, canvas);
+      this.commit({
+        ...doc,
+        layers: [
+          ...doc.layers,
+          {
+            id,
+            kind: 'image',
+            imageSource,
+            matrix: translate(
+              (doc.width - width) / 2,
+              (doc.height - height) / 2
+            ),
+            width,
+            height,
+            color: '#000000',
+            fill: 'transparent',
+            strokeWidth: 0,
+            opacity: 1,
+          },
+        ],
+      });
+      this.select(id);
+    } finally {
+      controller.abort();
+      this.assetControllers.delete(controller);
+    }
+  }
+  revert() {
+    if (this.state.phase !== 'ready' || !this.history) return;
+    this.exportFinalizer = null;
+    this.history.cancel();
+    this.commit(this.history.baseline);
+    this.select(null);
   }
   hasChanges() {
     return this.history?.changed ?? false;
   }
   select(selected: string | null) {
-    this.emit({ selected });
+    this.emit({
+      selected:
+        selected &&
+        this.state.document?.layers.some(
+          (layer) => layer.id === selected && !layer.locked && !layer.hidden
+        )
+          ? selected
+          : null,
+    });
   }
   private publish(committed = false) {
     if (!this.history) return;
     const selected = this.history.current.layers.some(
-      (layer) => layer.id === this.state.selected
+      (layer) =>
+        layer.id === this.state.selected && !layer.locked && !layer.hidden
     )
       ? this.state.selected
       : null;
@@ -312,7 +492,13 @@ export class CanvasEngine implements ImageEditorInstance {
   }
   removeSelected() {
     const doc = this.state.document;
-    if (doc && this.state.selected)
+    if (
+      doc &&
+      this.state.selected &&
+      doc.layers.some(
+        (layer) => layer.id === this.state.selected && !layer.locked
+      )
+    )
       this.commit({
         ...doc,
         layers: doc.layers.filter((layer) => layer.id !== this.state.selected),

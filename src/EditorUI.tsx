@@ -1,23 +1,35 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { CanvasEngine, EngineState } from './engine';
 import { CanvasSurface, SurfaceActions } from './CanvasSurface';
 import {
-  clamp,
   cropDocument,
   DEFAULT_EFFECTS,
+  DEFAULT_FRAME,
+  duplicateLayer,
+  Effects,
   flipDocument,
+  flipLayer,
+  ImageDocument,
   Layer,
   multiply,
   Rect,
   resizeDocument,
   rotateDocument,
   rotateLayer,
+  reorderLayer,
   scale,
   ShapeKind,
+  straightenDocument,
   translate,
   updateLayer,
 } from './model';
-import { textSize } from './render';
+import { filterPixels, textSize } from './render';
 import { Icon } from './icons';
 import { translator } from './locale';
 import type { EditorTool, ImageEditorProps } from './types';
@@ -84,14 +96,38 @@ function ColorField({
   onChange(value: string): void;
 }) {
   return (
-    <label className="rie-label">
-      <span>{label}</span>
-      <input
-        type="color"
-        value={value === 'transparent' ? '#0797a7' : value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
+    <fieldset className="rie-color-field">
+      <legend>{label}</legend>
+      <div className="rie-swatches">
+        {[
+          '#ffffff',
+          '#202a38',
+          '#e5484d',
+          '#f59e0b',
+          '#facc15',
+          '#30a46c',
+          '#0797a7',
+          '#3b82f6',
+          '#8b5cf6',
+        ].map((color) => (
+          <button
+            key={color}
+            type="button"
+            className="rie-swatch"
+            style={{ background: color }}
+            aria-label={`${label}: ${color}`}
+            aria-pressed={value.toLowerCase() === color}
+            onClick={() => onChange(color)}
+          />
+        ))}
+        <input
+          aria-label={label}
+          type="color"
+          value={value === 'transparent' ? '#0797a7' : value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </div>
+    </fieldset>
   );
 }
 function SliderField({
@@ -101,6 +137,10 @@ function SliderField({
   min = 0,
   max = 100,
   testId,
+  onStart,
+  onEnd,
+  step = 1,
+  suffix = '',
 }: {
   label: string;
   value: number;
@@ -108,32 +148,201 @@ function SliderField({
   min?: number;
   max?: number;
   testId?: string;
+  onStart?(): void;
+  onEnd?(): void;
+  step?: number;
+  suffix?: string;
 }) {
   return (
     <label className="rie-label">
       <span>
         {label}
-        <output>{value}</output>
+        <output>
+          {Math.round(value * 100) / 100}
+          {suffix}
+        </output>
       </span>
       <input
         type="range"
         min={min}
         max={max}
+        step={step}
         value={value}
         data-testid={testId}
+        onPointerDown={onStart}
+        onPointerUp={onEnd}
+        onPointerCancel={onEnd}
+        onBlur={onEnd}
+        onKeyDown={(event) => {
+          if (
+            event.key.startsWith('Arrow') ||
+            ['Home', 'End', 'PageUp', 'PageDown'].includes(event.key)
+          )
+            onStart?.();
+        }}
+        onKeyUp={onEnd}
         onChange={(event) => onChange(Number(event.target.value))}
       />
     </label>
   );
 }
+function ChoicePicker({
+  label,
+  value,
+  choices,
+  onChange,
+  t,
+}: {
+  label: string;
+  value: string;
+  choices: readonly { value: string; label: string }[];
+  onChange(value: string): void;
+  t(key: string): string;
+}) {
+  const [open, setOpen] = useState(false),
+    [query, setQuery] = useState('');
+  const root = useRef<HTMLDivElement>(null),
+    trigger = useRef<HTMLButtonElement>(null),
+    search = useRef<HTMLInputElement>(null),
+    id = useId();
+  const filtered = choices.filter((item) =>
+    item.label.toLocaleLowerCase().includes(query.toLocaleLowerCase())
+  );
+  useEffect(() => {
+    if (!open) return;
+    search.current?.focus();
+    const outside = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', outside);
+    return () => document.removeEventListener('pointerdown', outside);
+  }, [open]);
+  return (
+    <div
+      className="rie-picker rie-label"
+      ref={root}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          event.stopPropagation();
+          setOpen(false);
+          trigger.current?.focus();
+        }
+        if (open && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
+          event.preventDefault();
+          const items = [
+              ...(root.current?.querySelectorAll<HTMLButtonElement>(
+                '[role="option"]'
+              ) ?? []),
+            ],
+            index = items.indexOf(document.activeElement as HTMLButtonElement);
+          items[
+            (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) %
+              items.length
+          ]?.focus();
+        }
+      }}
+    >
+      <span id={`${id}-label`}>{label}</span>
+      <button
+        type="button"
+        ref={trigger}
+        className="rie-picker-trigger"
+        aria-labelledby={`${id}-label ${id}-value`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={`${id}-list`}
+        onClick={() => {
+          setQuery('');
+          setOpen(!open);
+        }}
+      >
+        <span id={`${id}-value`}>
+          {choices.find((item) => item.value === value)?.label ?? value}
+        </span>
+        <Icon name="chevron_down" />
+      </button>
+      {open ? (
+        <div className="rie-picker-popup">
+          <input
+            ref={search}
+            value={query}
+            placeholder={t('picker.search')}
+            aria-label={t('picker.search')}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <div id={`${id}-list`} role="listbox" aria-label={label}>
+            {filtered.map((item) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={item.value === value}
+                key={item.value}
+                onClick={() => {
+                  onChange(item.value);
+                  setOpen(false);
+                  trigger.current?.focus();
+                }}
+              >
+                {item.label}
+                {item.value === value ? <Icon name="check" /> : null}
+              </button>
+            ))}
+            {!filtered.length ? (
+              <p className="rie-help">{t('picker.empty')}</p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+function FilterPreview({
+  engine,
+  preset,
+  revision,
+}: {
+  engine: CanvasEngine;
+  preset: Effects['preset'];
+  revision: number;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current,
+      image = engine.image;
+    if (!canvas || !image) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const factor = Math.max(
+      canvas.width / image.width,
+      canvas.height / image.height
+    );
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(
+      image.source,
+      (canvas.width - image.width * factor) / 2,
+      (canvas.height - image.height * factor) / 2,
+      image.width * factor,
+      image.height * factor
+    );
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    filterPixels(pixels.data, { ...DEFAULT_EFFECTS, preset });
+    ctx.putImageData(pixels, 0, 0);
+  }, [engine, preset, revision]);
+  return <canvas ref={ref} width={144} height={96} aria-hidden="true" />;
+}
 const toolNames: EditorTool[] = [
   'select',
-  'filter',
   'crop',
-  'resize',
+  'adjust',
+  'filter',
   'draw',
   'text',
   'shapes',
+  'stickers',
+  'redact',
+  'frame',
+  'fill',
+  'resize',
 ];
 
 export function EditorUI({
@@ -151,18 +360,97 @@ export function EditorUI({
 }) {
   const doc = state.document,
     t = translator(state.options),
+    shell = useRef<HTMLDivElement>(null),
+    nav = useRef<HTMLElement>(null),
     surface = useRef<SurfaceActions>(null),
-    textField = useRef<HTMLTextAreaElement>(null);
+    textField = useRef<HTMLTextAreaElement>(null),
+    uploadField = useRef<HTMLInputElement>(null),
+    straightening = useRef<ImageDocument | null>(null);
   const [tool, setTool] = useState<EditorTool>('select'),
     [panel, setPanel] = useState(false),
     [locked, setLocked] = useState(true);
+  const [overflow, setOverflow] = useState({
+    before: false,
+    after: false,
+    horizontal: false,
+  });
+  const measureNav = () => {
+    const element = nav.current;
+    if (!element) return;
+    const horizontal = element.scrollWidth > element.clientWidth + 2;
+    const before = horizontal ? element.scrollLeft > 2 : element.scrollTop > 2;
+    const after = horizontal
+      ? element.scrollLeft + element.clientWidth < element.scrollWidth - 2
+      : element.scrollTop + element.clientHeight < element.scrollHeight - 2;
+    setOverflow((previous) =>
+      previous.before === before &&
+      previous.after === after &&
+      previous.horizontal === horizontal
+        ? previous
+        : { before, after, horizontal }
+    );
+  };
+  useEffect(() => {
+    if (!nav.current || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measureNav);
+    observer.observe(nav.current);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const element = nav.current,
+        button = element?.querySelector<HTMLButtonElement>(
+          '[aria-pressed="true"]'
+        );
+      if (!element || !button) return;
+      const parent = element.getBoundingClientRect(),
+        child = button.getBoundingClientRect();
+      if (element.scrollWidth > element.clientWidth + 2) {
+        if (child.left < parent.left + 26)
+          element.scrollBy({ left: child.left - parent.left - 26 });
+        if (child.right > parent.right - 26)
+          element.scrollBy({ left: child.right - parent.right + 26 });
+      } else {
+        if (child.top < parent.top + 26)
+          element.scrollBy({ top: child.top - parent.top - 26 });
+        if (child.bottom > parent.bottom - 26)
+          element.scrollBy({ top: child.bottom - parent.bottom + 26 });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [tool]);
+  const [compare, setCompare] = useState(false),
+    [view, setView] = useState({ zoom: 1, fitted: true }),
+    [exportOpen, setExportOpen] = useState(false),
+    [helpOpen, setHelpOpen] = useState(false),
+    [adding, setAdding] = useState(false),
+    [angle, setAngle] = useState(0),
+    [shape, setShape] = useState<ShapeKind | null>(null),
+    [redaction, setRedaction] = useState<{
+      mode: 'pixelate' | 'blur' | 'solid';
+      size: number;
+    }>({ mode: 'pixelate', size: 14 });
+  useEffect(() => {
+    const element = shell.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      element.style.setProperty(
+        '--rie-options-max-height',
+        `${Math.max(56, Math.min(220, entry.contentRect.height * 0.3))}px`
+      );
+      element.dataset.short = String(entry.contentRect.height < 330);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const [crop, setCrop] = useState<Rect>({ x: 0, y: 0, width: 1, height: 1 }),
     [ratio, setRatio] = useState<number | null>(null);
   const [brush, setBrush] = useState<{
     color: string;
     size: number;
     mode: 'brush' | 'highlighter' | 'eraser';
-  }>({ color: '#e5484d', size: 8, mode: 'brush' });
+    opacity: number;
+  }>({ color: '#e5484d', size: 8, mode: 'brush', opacity: 1 });
   const [error, setError] = useState(''),
     [saving, setSaving] = useState(false);
   useLayoutEffect(
@@ -199,10 +487,12 @@ export function EditorUI({
     }
     setTool(next);
     setPanel(next !== 'select');
+    setCompare(false);
     setError('');
   };
   const closePanel = () => {
     if (tool === 'crop') applyCrop();
+    if (tool === 'select') engine.select(null);
     setTool('select');
     setPanel(false);
   };
@@ -228,8 +518,13 @@ export function EditorUI({
   const changeLayer = (patch: Partial<Layer>) => {
     if (doc && layer) engine.commit(updateLayer(doc, layer.id, patch));
   };
+  const previewLayer = (patch: Partial<Layer>) => {
+    if (doc && layer) engine.preview(updateLayer(doc, layer.id, patch));
+  };
+  const gesture = { onStart: () => engine.begin(), onEnd: () => engine.end() };
   const addShape = (kind: ShapeKind) => {
     if (!doc) return;
+    setShape(kind);
     const width = Math.max(10, doc.width * 0.35),
       height = Math.max(10, doc.height * 0.25);
     const item: Layer = {
@@ -250,7 +545,6 @@ export function EditorUI({
     engine.select(id);
     setTool('text');
     setPanel(true);
-    requestAnimationFrame(() => textField.current?.focus());
   };
   const addText = () => {
     if (!doc) return;
@@ -279,6 +573,7 @@ export function EditorUI({
     };
     engine.commit({ ...doc, layers: [...doc.layers, item] });
     editText(item.id);
+    requestAnimationFrame(() => surface.current?.editText(item.id));
   };
   const changeText = (patch: Partial<Layer>, preview = false) => {
     if (!doc || !layer || layer.kind !== 'text') return;
@@ -288,7 +583,8 @@ export function EditorUI({
       item.fontSize ?? 40,
       item.fontFamily ?? 'sans-serif',
       item.bold,
-      item.italic
+      item.italic,
+      item.lineHeight
     );
     const next = updateLayer(doc, layer.id, { ...patch, ...size });
     if (preview) engine.preview(next);
@@ -325,6 +621,7 @@ export function EditorUI({
     const next = rotateDocument(current, clockwise);
     engine.commit(next);
     setCrop({ x: 0, y: 0, width: next.width, height: next.height });
+    if (ratio) setRatio(1 / ratio);
   };
   const flip = (horizontal: boolean) => {
     const current = applyCrop();
@@ -334,12 +631,58 @@ export function EditorUI({
   };
   const reorder = (direction: number) => {
     if (!doc || !layer) return;
-    const layers = [...doc.layers],
-      index = layers.indexOf(layer),
-      target = clamp(index + direction, 0, layers.length - 1);
-    layers.splice(index, 1);
-    layers.splice(target, 0, layer);
-    engine.commit({ ...doc, layers });
+    engine.commit(
+      reorderLayer(doc, layer.id, direction > 0 ? 'forward' : 'backward')
+    );
+  };
+  const importImage = async (file: File) => {
+    if (!file.type.startsWith('image/') || adding) return;
+    setAdding(true);
+    setError('');
+    const url = URL.createObjectURL(file);
+    try {
+      await engine.addImage(url);
+      setTool('stickers');
+      setPanel(true);
+    } catch {
+      setError(t('status.import_failed'));
+    } finally {
+      URL.revokeObjectURL(url);
+      setAdding(false);
+    }
+  };
+  const addSymbol = (symbol: string) => {
+    if (!doc) return;
+    const fontSize = Math.max(24, Math.min(doc.width, doc.height) / 3),
+      size = textSize(symbol, fontSize, 'sans-serif');
+    const item: Layer = {
+      id: crypto.randomUUID(),
+      kind: 'text',
+      ...size,
+      matrix: translate(
+        (doc.width - size.width) / 2,
+        (doc.height - size.height) / 2
+      ),
+      text: symbol,
+      fontSize,
+      fontFamily: 'sans-serif',
+      color: brush.color,
+      fill: 'transparent',
+      strokeWidth: 0,
+      opacity: 1,
+    };
+    engine.commit({ ...doc, layers: [...doc.layers, item] });
+    engine.select(item.id);
+  };
+  const cancelCrop = () => {
+    setTool('select');
+    setPanel(false);
+  };
+  const endStraighten = () => {
+    if (!straightening.current) return;
+    engine.end();
+    straightening.current = null;
+    setAngle(0);
   };
   const save = async () => {
     if (disabled) return;
@@ -362,13 +705,14 @@ export function EditorUI({
       <div className="rie-stack" data-testid="native-selection-controls">
         <div className="rie-row">
           {iconButton('duplicate', 'actions.duplicate', () => {
-            const copy = {
-              ...layer,
-              id: crypto.randomUUID(),
-              matrix: multiply(translate(12, 12), layer.matrix),
-            };
-            engine.commit({ ...doc, layers: [...doc.layers, copy] });
-            engine.select(copy.id);
+            const next = duplicateLayer(doc, layer.id);
+            engine.commit(next);
+            engine.select(
+              next.layers.find(
+                (item) =>
+                  !doc.layers.some((existing) => existing.id === item.id)
+              )?.id ?? null
+            );
           })}
           {iconButton('forward', 'actions.forward', () => reorder(1))}
           {iconButton('backward', 'actions.backward', () => reorder(-1))}
@@ -376,12 +720,42 @@ export function EditorUI({
             engine.removeSelected()
           )}
         </div>
-        <ColorField
-          label={t('draw.color')}
-          value={layer.color}
-          onChange={(color) => changeLayer({ color })}
-        />
-        {layer.kind !== 'text' ? (
+        <div className="rie-row">
+          {iconButton('flip_horizontal', 'rotate.flip_horizontal', () =>
+            changeLayer(flipLayer(layer, true))
+          )}
+          {iconButton('flip_vertical', 'rotate.flip_vertical', () =>
+            changeLayer(flipLayer(layer, false))
+          )}
+          <button
+            type="button"
+            className="rie-icon-button"
+            title={t('selection.locked')}
+            aria-label={t('selection.locked')}
+            aria-pressed={!!layer.locked}
+            onClick={() => changeLayer({ locked: !layer.locked })}
+          >
+            <Icon name="lock" />
+          </button>
+          <button
+            type="button"
+            className="rie-icon-button"
+            title={t('selection.hidden')}
+            aria-label={t('selection.hidden')}
+            aria-pressed={!!layer.hidden}
+            onClick={() => changeLayer({ hidden: !layer.hidden })}
+          >
+            <Icon name="hidden" />
+          </button>
+        </div>
+        {layer.kind !== 'image' ? (
+          <ColorField
+            label={t('draw.color')}
+            value={layer.color}
+            onChange={(color) => changeLayer({ color })}
+          />
+        ) : null}
+        {!['text', 'image', 'redaction'].includes(layer.kind) ? (
           <NumberField
             label={t('shapes.stroke_width')}
             value={layer.strokeWidth}
@@ -390,7 +764,9 @@ export function EditorUI({
             onCommit={(strokeWidth) => changeLayer({ strokeWidth })}
           />
         ) : null}
-        {!['path', 'text', 'line', 'arrow'].includes(layer.kind) ? (
+        {!['path', 'text', 'line', 'arrow', 'image', 'redaction'].includes(
+          layer.kind
+        ) ? (
           <>
             <ColorField
               label={t('shapes.fill')}
@@ -411,10 +787,38 @@ export function EditorUI({
             </button>
           </>
         ) : null}
+        {['line', 'arrow'].includes(layer.kind) ? (
+          <div className="rie-grid">
+            {(['arrowStart', 'arrowEnd'] as const).map((key) => (
+              <ChoicePicker
+                key={key}
+                label={t(
+                  key === 'arrowStart'
+                    ? 'shapes.arrow_start'
+                    : 'shapes.arrow_end'
+                )}
+                value={
+                  layer[key] ??
+                  (key === 'arrowEnd' && layer.kind === 'arrow'
+                    ? 'arrow'
+                    : 'none')
+                }
+                choices={['none', 'arrow', 'circle', 'square'].map((value) => ({
+                  value,
+                  label: t(`shapes.end_${value}`),
+                }))}
+                onChange={(value) => changeLayer({ [key]: value })}
+                t={t}
+              />
+            ))}
+          </div>
+        ) : null}
         <SliderField
           label={t('draw.opacity')}
           value={Math.round(layer.opacity * 100)}
-          onChange={(opacity) => changeLayer({ opacity: opacity / 100 })}
+          onChange={(opacity) => previewLayer({ opacity: opacity / 100 })}
+          {...gesture}
+          suffix="%"
         />
         <NumberField
           label={t('selection.rotation')}
@@ -476,7 +880,7 @@ export function EditorUI({
   if (doc && tool === 'crop')
     controls = (
       <>
-        <div className="rie-row" aria-label={t('crop.aspect_ratio')}>
+        <div className="rie-ratios" aria-label={t('crop.aspect_ratio')}>
           {[
             [null, 'crop.aspect_free'],
             [doc.width / doc.height, 'crop.aspect_original'],
@@ -484,6 +888,8 @@ export function EditorUI({
             [4 / 3, '4:3'],
             [16 / 9, '16:9'],
             [3 / 4, '3:4'],
+            [9 / 16, '9:16'],
+            [3 / 2, '3:2'],
           ].map(([value, label]) => (
             <button
               type="button"
@@ -491,10 +897,42 @@ export function EditorUI({
               aria-pressed={ratio === value}
               onClick={() => presetRatio(value as number | null)}
             >
+              <span
+                aria-hidden="true"
+                className="rie-ratio-outline"
+                style={{ aspectRatio: value || 1.45 }}
+              />
               {String(label).startsWith('crop.') ? t(String(label)) : label}
             </button>
           ))}
         </div>
+        <SliderField
+          label={t('crop.straighten')}
+          value={angle}
+          min={-45}
+          max={45}
+          step={0.5}
+          suffix="°"
+          testId="native-crop-straighten"
+          onStart={() => {
+            if (!straightening.current) {
+              straightening.current = applyCrop();
+              engine.begin();
+            }
+          }}
+          onChange={(value) => {
+            const base = straightening.current ?? doc;
+            if (!straightening.current) {
+              straightening.current = base;
+              engine.begin();
+            }
+            const next = straightenDocument(base, value);
+            engine.preview(next);
+            setAngle(value);
+            setCrop({ x: 0, y: 0, width: next.width, height: next.height });
+          }}
+          onEnd={endStraighten}
+        />
         <div className="rie-grid">
           <NumberField
             label={t('crop.region_x')}
@@ -526,13 +964,31 @@ export function EditorUI({
             label={t('resize.width')}
             value={crop.width}
             max={doc.width - crop.x}
-            onCommit={(width) => setCrop({ ...crop, width })}
+            onCommit={(width) => {
+              const w = ratio
+                ? Math.min(width, (doc.height - crop.y) * ratio)
+                : width;
+              setCrop({
+                ...crop,
+                width: w,
+                height: ratio ? w / ratio : crop.height,
+              });
+            }}
           />
           <NumberField
             label={t('resize.height')}
             value={crop.height}
             max={doc.height - crop.y}
-            onCommit={(height) => setCrop({ ...crop, height })}
+            onCommit={(height) => {
+              const h = ratio
+                ? Math.min(height, (doc.width - crop.x) / ratio)
+                : height;
+              setCrop({
+                ...crop,
+                height: h,
+                width: ratio ? h * ratio : crop.width,
+              });
+            }}
           />
         </div>
         <div className="rie-row" aria-label={t('crop.rotate_flip')}>
@@ -547,14 +1003,20 @@ export function EditorUI({
             flip(false)
           )}
         </div>
-        <button
-          type="button"
-          className="rie-primary"
-          data-testid="native-crop-apply"
-          onClick={closePanel}
-        >
-          {t('actions.apply')}
-        </button>
+        <div className="rie-row rie-actions-row">
+          <button type="button" onClick={cancelCrop}>
+            {t('crop.cancel')}
+          </button>
+          <button
+            type="button"
+            className="rie-primary"
+            data-testid="native-crop-apply"
+            onClick={closePanel}
+          >
+            <Icon name="check" />
+            {t('actions.apply')}
+          </button>
+        </div>
       </>
     );
   if (doc && tool === 'resize')
@@ -592,6 +1054,7 @@ export function EditorUI({
           aria-pressed={locked}
           onClick={() => setLocked(!locked)}
         >
+          <Icon name={locked ? 'lock' : 'unlock'} />
           {t('resize.lock_aspect')}
         </button>
       </div>
@@ -608,6 +1071,7 @@ export function EditorUI({
               onClick={() => setBrush({ ...brush, mode })}
               data-testid={`native-draw-${mode}`}
             >
+              <Icon name={mode === 'brush' ? 'draw' : mode} />
               {t(`draw.${mode}`)}
             </button>
           ))}
@@ -625,6 +1089,14 @@ export function EditorUI({
           onChange={(size) => setBrush({ ...brush, size })}
           testId="native-draw-size"
         />
+        <SliderField
+          label={t('draw.opacity')}
+          value={Math.round(brush.opacity * 100)}
+          min={1}
+          max={100}
+          suffix="%"
+          onChange={(opacity) => setBrush({ ...brush, opacity: opacity / 100 })}
+        />
       </>
     );
   if (tool === 'text')
@@ -636,6 +1108,7 @@ export function EditorUI({
           data-testid="native-text-add"
           onClick={addText}
         >
+          <Icon name="text" />
           {t('text.add')}
         </button>
         {layer?.kind === 'text' ? (
@@ -660,19 +1133,21 @@ export function EditorUI({
               testId="native-text-size"
               onCommit={(fontSize) => changeText({ fontSize })}
             />
-            <label className="rie-label">
-              <span>{t('text.font_family')}</span>
-              <select
-                value={layer.fontFamily ?? 'sans-serif'}
-                onChange={(event) =>
-                  changeText({ fontFamily: event.target.value })
-                }
-              >
-                <option value="sans-serif">{t('text.sans')}</option>
-                <option value="serif">{t('text.serif')}</option>
-                <option value="monospace">{t('text.mono')}</option>
-              </select>
-            </label>
+            <ChoicePicker
+              label={t('text.font_family')}
+              value={layer.fontFamily ?? 'sans-serif'}
+              choices={[
+                { value: 'sans-serif', label: t('text.sans') },
+                { value: 'serif', label: t('text.serif') },
+                { value: 'monospace', label: t('text.mono') },
+                { value: 'Arial, sans-serif', label: 'Arial' },
+                { value: 'Georgia, serif', label: 'Georgia' },
+                { value: 'Verdana, sans-serif', label: 'Verdana' },
+                { value: '"Trebuchet MS", sans-serif', label: 'Trebuchet MS' },
+              ]}
+              onChange={(fontFamily) => changeText({ fontFamily })}
+              t={t}
+            />
             <div className="rie-row">
               <button
                 type="button"
@@ -688,7 +1163,38 @@ export function EditorUI({
               >
                 {t('text.italic')}
               </button>
+              <button
+                type="button"
+                aria-pressed={!!layer.underline}
+                onClick={() => changeText({ underline: !layer.underline })}
+              >
+                {t('text.underline')}
+              </button>
             </div>
+            <div className="rie-row">
+              {(['left', 'center', 'right'] as const).map((textAlign) => (
+                <button
+                  key={textAlign}
+                  type="button"
+                  className="rie-icon-button"
+                  aria-label={t(`text.align_${textAlign}`)}
+                  title={t(`text.align_${textAlign}`)}
+                  aria-pressed={(layer.textAlign ?? 'left') === textAlign}
+                  onClick={() => changeText({ textAlign })}
+                >
+                  <Icon name={`align_${textAlign}`} />
+                </button>
+              ))}
+            </div>
+            <SliderField
+              label={t('text.line_height')}
+              min={0.8}
+              max={2.4}
+              step={0.1}
+              value={layer.lineHeight ?? 1.2}
+              onChange={(lineHeight) => changeText({ lineHeight }, true)}
+              {...gesture}
+            />
             {selectedControls}
           </>
         ) : null}
@@ -719,23 +1225,61 @@ export function EditorUI({
     controls = (
       <>
         <div className="rie-presets" data-testid="native-filter-presets">
-          {(['none', 'grayscale', 'sepia', 'invert', 'vintage'] as const).map(
-            (preset) => (
-              <button
-                type="button"
-                key={preset}
-                aria-pressed={doc.effects.preset === preset}
-                data-testid={`native-filter-preset-${preset}`}
-                onClick={() =>
-                  engine.commit({ ...doc, effects: { ...doc.effects, preset } })
-                }
-              >
-                {t(`filters.${preset}`)}
-              </button>
-            )
-          )}
+          {(
+            [
+              'none',
+              'warm',
+              'cool',
+              'grayscale',
+              'noir',
+              'sepia',
+              'vintage',
+              'fade',
+              'chrome',
+              'pastel',
+              'stark',
+              'wash',
+              'sepiaBlues',
+              'sepiaColor',
+              'sepiaRust',
+              'invert',
+            ] as const
+          ).map((preset) => (
+            <button
+              type="button"
+              key={preset}
+              aria-pressed={doc.effects.preset === preset}
+              data-testid={`native-filter-preset-${preset}`}
+              onClick={() =>
+                engine.commit({ ...doc, effects: { ...doc.effects, preset } })
+              }
+            >
+              <FilterPreview
+                engine={engine}
+                preset={preset}
+                revision={state.imageRevision}
+              />
+              <span>{t(`filters.${preset}`)}</span>
+            </button>
+          ))}
         </div>
-        {(['brightness', 'contrast', 'saturation'] as const).map((key) => (
+      </>
+    );
+  if (doc && tool === 'adjust')
+    controls = (
+      <>
+        {(
+          [
+            'brightness',
+            'contrast',
+            'exposure',
+            'saturation',
+            'temperature',
+            'clarity',
+            'gamma',
+            'vignette',
+          ] as const
+        ).map((key) => (
           <SliderField
             key={key}
             label={t(`filters.${key}`)}
@@ -744,24 +1288,287 @@ export function EditorUI({
             max={100}
             testId={`native-filter-${key}`}
             onChange={(value) =>
-              engine.commit({
+              engine.preview({
                 ...doc,
                 effects: { ...doc.effects, [key]: value },
               })
             }
+            {...gesture}
           />
         ))}
         <button
           type="button"
-          onClick={() => engine.commit({ ...doc, effects: DEFAULT_EFFECTS })}
+          onClick={() =>
+            engine.commit({
+              ...doc,
+              effects: { ...DEFAULT_EFFECTS, preset: doc.effects.preset },
+            })
+          }
         >
           {t('actions.reset')}
         </button>
       </>
     );
-  if (tool === 'select') controls = selectedControls;
+  if (doc && tool === 'stickers')
+    controls = (
+      <>
+        <button
+          type="button"
+          className="rie-primary"
+          disabled={adding}
+          data-testid="native-sticker-upload"
+          onClick={() => uploadField.current?.click()}
+        >
+          <Icon name="upload" />
+          {t(adding ? 'status.adding_image' : 'stickers.upload')}
+        </button>
+        <p className="rie-help">{t('stickers.hint')}</p>
+        <div className="rie-symbols" aria-label={t('stickers.symbols')}>
+          {[
+            ['★', 'star'],
+            ['♥', 'heart'],
+            ['✓', 'check'],
+            ['✦', 'spark'],
+          ].map(([symbol, key]) => (
+            <button
+              type="button"
+              key={key}
+              aria-label={t(`stickers.${key}`)}
+              title={t(`stickers.${key}`)}
+              onClick={() => addSymbol(symbol)}
+            >
+              {symbol}
+            </button>
+          ))}
+        </div>
+        {layer ? selectedControls : null}
+      </>
+    );
+  if (doc && tool === 'frame')
+    controls = (
+      <>
+        <div className="rie-frame-presets" aria-label={t('frame.style')}>
+          {(
+            [
+              'none',
+              'solid',
+              'inset',
+              'double',
+              'mat',
+              'polaroid',
+              'bevel',
+              'hooks',
+              'cross',
+              'edge',
+            ] as const
+          ).map((style) => (
+            <button
+              type="button"
+              key={style}
+              aria-pressed={doc.frame.style === style}
+              data-testid={`native-frame-${style}`}
+              onClick={() =>
+                engine.commit({
+                  ...doc,
+                  frame: {
+                    ...doc.frame,
+                    style,
+                    width:
+                      doc.frame.width ||
+                      Math.max(
+                        8,
+                        Math.round(Math.min(doc.width, doc.height) * 0.04)
+                      ),
+                  },
+                })
+              }
+            >
+              <span className="rie-frame-preview" data-frame={style} />
+              <span>{t(`frame.${style}`)}</span>
+            </button>
+          ))}
+        </div>
+        {doc.frame.style !== 'none' ? (
+          <>
+            <ColorField
+              label={t('draw.color')}
+              value={doc.frame.color}
+              onChange={(color) =>
+                engine.commit({ ...doc, frame: { ...doc.frame, color } })
+              }
+            />
+            <SliderField
+              label={t('frame.width')}
+              value={doc.frame.width}
+              min={1}
+              max={Math.floor(Math.min(doc.width, doc.height) / 3)}
+              suffix=" px"
+              onChange={(width) =>
+                engine.preview({ ...doc, frame: { ...doc.frame, width } })
+              }
+              {...gesture}
+            />
+          </>
+        ) : null}
+        {state.options.features?.imageEditor?.tools?.corners !== false ? (
+          <SliderField
+            label={t('frame.corners')}
+            value={doc.cornerRadius}
+            min={0}
+            max={Math.floor(Math.min(doc.width, doc.height) / 2)}
+            suffix=" px"
+            testId="native-frame-corners"
+            onChange={(cornerRadius) =>
+              engine.preview({ ...doc, cornerRadius })
+            }
+            {...gesture}
+          />
+        ) : null}
+        <button
+          type="button"
+          onClick={() =>
+            engine.commit({ ...doc, frame: DEFAULT_FRAME, cornerRadius: 0 })
+          }
+        >
+          {t('actions.reset')}
+        </button>
+      </>
+    );
+  if (doc && tool === 'fill')
+    controls = (
+      <>
+        <p className="rie-help">{t('fill.hint')}</p>
+        <ColorField
+          label={t('draw.color')}
+          value={doc.background}
+          onChange={(background) => engine.commit({ ...doc, background })}
+        />
+        <button
+          type="button"
+          aria-pressed={doc.background === 'transparent'}
+          data-testid="native-fill-transparent"
+          onClick={() => engine.commit({ ...doc, background: 'transparent' })}
+        >
+          <span className="rie-transparent-preview" />
+          {t('fill.transparent')}
+        </button>
+      </>
+    );
+  if (tool === 'redact')
+    controls = (
+      <>
+        <div className="rie-grid">
+          {(['pixelate', 'blur', 'solid'] as const).map((mode) => (
+            <button
+              type="button"
+              key={mode}
+              aria-pressed={redaction.mode === mode}
+              onClick={() => {
+                setRedaction({ ...redaction, mode });
+                if (layer?.kind === 'redaction')
+                  changeLayer({ redactionMode: mode });
+              }}
+            >
+              {t(`redact.${mode}`)}
+            </button>
+          ))}
+        </div>
+        <SliderField
+          label={t('redact.size')}
+          value={
+            layer?.kind === 'redaction'
+              ? (layer.redactionSize ?? redaction.size)
+              : redaction.size
+          }
+          min={2}
+          max={80}
+          onChange={(size) => {
+            setRedaction({ ...redaction, size });
+            if (layer?.kind === 'redaction')
+              previewLayer({ redactionSize: size });
+          }}
+          {...gesture}
+        />
+        <p className="rie-help">{t('redact.hint')}</p>
+        {layer?.kind === 'redaction' ? selectedControls : null}
+      </>
+    );
+  if (tool === 'select')
+    controls = (
+      <>
+        {selectedControls}
+        {doc?.layers.length ? (
+          <div className="rie-layer-list">
+            <h3>{t('selection.layers')}</h3>
+            {[...doc.layers].reverse().map((item) => (
+              <div className="rie-layer-row" key={item.id}>
+                <button
+                  type="button"
+                  key={item.id}
+                  disabled={item.locked || item.hidden}
+                  aria-pressed={item.id === state.selected}
+                  onClick={() => engine.select(item.id)}
+                >
+                  <Icon
+                    name={
+                      item.kind === 'image'
+                        ? 'stickers'
+                        : item.kind === 'path'
+                          ? 'draw'
+                          : item.kind === 'redaction'
+                            ? 'redact'
+                            : item.kind
+                    }
+                  />
+                  <span>
+                    {item.kind === 'text'
+                      ? item.text
+                      : t(
+                          item.kind === 'image' || item.kind === 'path'
+                            ? `selection.${item.kind}`
+                            : item.kind === 'redaction'
+                              ? 'tools.redact'
+                              : `shapes.${item.kind}`
+                        )}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="rie-icon-button"
+                  aria-label={t('selection.locked')}
+                  title={t('selection.locked')}
+                  aria-pressed={!!item.locked}
+                  onClick={() =>
+                    engine.commit(
+                      updateLayer(doc, item.id, { locked: !item.locked })
+                    )
+                  }
+                >
+                  <Icon name={item.locked ? 'lock' : 'unlock'} />
+                </button>
+                <button
+                  type="button"
+                  className="rie-icon-button"
+                  aria-label={t('selection.hidden')}
+                  title={t('selection.hidden')}
+                  aria-pressed={!!item.hidden}
+                  onClick={() =>
+                    engine.commit(
+                      updateLayer(doc, item.id, { hidden: !item.hidden })
+                    )
+                  }
+                >
+                  <Icon name="hidden" />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </>
+    );
   return (
     <div
+      ref={shell}
       className="rie-theme"
       data-testid="image-editor-theme"
       data-theme={state.options.theme ?? 'light'}
@@ -792,8 +1599,12 @@ export function EditorUI({
           engine.redo();
         }
         if (event.key === 'Escape' && tool === 'crop') {
-          setTool('select');
-          setPanel(false);
+          cancelCrop();
+        }
+        if (event.key === 'Escape') {
+          setCompare(false);
+          setExportOpen(false);
+          setHelpOpen(false);
         }
       }}
     >
@@ -815,43 +1626,53 @@ export function EditorUI({
             () => engine.redo(),
             !state.canRedo
           )}
-          {iconButton(
-            'delete',
-            'actions.delete',
-            () => engine.removeSelected(),
-            !layer
-          )}
+          <button
+            type="button"
+            className="rie-icon-button"
+            aria-label={t('toolbar.reset')}
+            title={t('toolbar.reset')}
+            disabled={disabled || !engine.hasChanges()}
+            onClick={() => {
+              surface.current?.cancel();
+              engine.revert();
+              setTool('select');
+              setPanel(false);
+              setCompare(false);
+            }}
+          >
+            <Icon name="reset" />
+          </button>
         </div>
-        <div className="rie-toolbar-group">
+        <div className="rie-toolbar-group rie-toolbar-secondary">
           <button
             type="button"
             className="rie-icon-button"
-            aria-label={t('toolbar.zoom_out')}
-            title={t('toolbar.zoom_out')}
+            data-testid="native-compare"
+            aria-label={t('toolbar.compare')}
+            title={t('toolbar.compare')}
+            aria-pressed={compare}
             disabled={disabled}
-            onClick={() => surface.current?.zoom(0.8)}
+            onClick={() => {
+              surface.current?.cancel();
+              setCompare(!compare);
+            }}
           >
-            <Icon name="zoom_out" />
+            <Icon name="compare" />
           </button>
           <button
             type="button"
             className="rie-icon-button"
-            aria-label={t('toolbar.zoom_in')}
-            title={t('toolbar.zoom_in')}
+            data-testid="native-export-settings"
+            aria-label={t('export.title')}
+            title={t('export.title')}
+            aria-expanded={exportOpen}
             disabled={disabled}
-            onClick={() => surface.current?.zoom(1.25)}
+            onClick={() => {
+              setExportOpen(!exportOpen);
+              setHelpOpen(false);
+            }}
           >
-            <Icon name="zoom_in" />
-          </button>
-          <button
-            type="button"
-            className="rie-icon-button"
-            aria-label={t('toolbar.fit_to_screen')}
-            title={t('toolbar.fit_to_screen')}
-            disabled={disabled}
-            onClick={() => surface.current?.fit()}
-          >
-            <Icon name="fit_to_screen" />
+            <Icon name="export" />
           </button>
         </div>
         {state.options.showActions !== false ? (
@@ -871,6 +1692,62 @@ export function EditorUI({
           </div>
         ) : null}
       </div>
+      {exportOpen ? (
+        <div className="rie-export-panel" data-testid="native-export-panel">
+          <div className="rie-row" role="group" aria-label={t('export.format')}>
+            {(['image/png', 'image/jpeg', 'image/webp'] as const).map(
+              (type) => (
+                <button
+                  type="button"
+                  key={type}
+                  aria-pressed={
+                    (state.options.export?.type ?? 'image/png') === type
+                  }
+                  onClick={() =>
+                    engine.updateOptions({
+                      export: { ...state.options.export, type },
+                    })
+                  }
+                >
+                  {type.slice(6).toUpperCase()}
+                </button>
+              )
+            )}
+          </div>
+          {(state.options.export?.type ?? 'image/png') !== 'image/png' ? (
+            <SliderField
+              label={t('export.quality')}
+              min={1}
+              max={100}
+              value={Math.round((state.options.export?.quality ?? 0.92) * 100)}
+              suffix="%"
+              onChange={(quality) =>
+                engine.updateOptions({
+                  export: { ...state.options.export, quality: quality / 100 },
+                })
+              }
+            />
+          ) : null}
+          {iconButton('close', 'toolbar.close', () => setExportOpen(false))}
+        </div>
+      ) : null}
+      {helpOpen ? (
+        <p className="rie-help rie-shortcuts">
+          {t('canvas.instructions')} {t('canvas.edit_text_hint')}
+        </p>
+      ) : null}
+      <input
+        hidden
+        ref={uploadField}
+        type="file"
+        accept="image/*"
+        data-testid="native-sticker-file"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.currentTarget.value = '';
+          if (file) void importImage(file);
+        }}
+      />
       {error ? (
         <p role="alert" className="rie-error">
           {error}
@@ -882,34 +1759,72 @@ export function EditorUI({
         data-ready={state.phase === 'ready'}
         data-dock={state.options.features?.imageEditor?.dock ?? 'left'}
       >
-        <nav
-          className="rie-nav"
-          data-testid="native-tool-nav"
-          aria-label={t('toolbar.label')}
-        >
-          {toolNames
-            .filter(
-              (name) =>
-                state.options.features?.imageEditor?.tools?.[name] !== false
-            )
-            .map((name) => (
-              <button
-                type="button"
-                key={name}
-                data-testid={`native-tool-${name}`}
-                disabled={disabled}
-                aria-pressed={tool === name}
-                onClick={() => {
-                  choose(name);
-                  if (name === 'select') setPanel(true);
-                }}
-              >
-                <Icon name={name} />
-                <span>{t(`tools.${name}`)}</span>
-              </button>
-            ))}
-        </nav>
-        {panel ? (
+        <div className="rie-nav-wrap" data-horizontal={overflow.horizontal}>
+          <nav
+            ref={nav}
+            onScroll={measureNav}
+            className="rie-nav"
+            data-testid="native-tool-nav"
+            aria-label={t('toolbar.label')}
+          >
+            {toolNames
+              .filter(
+                (name) =>
+                  state.options.features?.imageEditor?.tools?.[name] !== false
+              )
+              .map((name) => (
+                <button
+                  type="button"
+                  key={name}
+                  data-testid={`native-tool-${name}`}
+                  disabled={disabled}
+                  aria-pressed={tool === name}
+                  onClick={() => {
+                    choose(name);
+                    if (name === 'select') setPanel(true);
+                  }}
+                >
+                  <Icon name={name} />
+                  <span>{t(`tools.${name}`)}</span>
+                </button>
+              ))}
+          </nav>
+          {overflow.before ? (
+            <button
+              type="button"
+              className="rie-nav-scroll rie-nav-previous"
+              aria-label={t('toolbar.previous_tools')}
+              title={t('toolbar.previous_tools')}
+              onClick={() =>
+                nav.current?.scrollBy({
+                  left: overflow.horizontal ? -180 : 0,
+                  top: overflow.horizontal ? 0 : -180,
+                  behavior: 'smooth',
+                })
+              }
+            >
+              <Icon name="chevron_down" />
+            </button>
+          ) : null}
+          {overflow.after ? (
+            <button
+              type="button"
+              className="rie-nav-scroll rie-nav-next"
+              aria-label={t('toolbar.more_tools')}
+              title={t('toolbar.more_tools')}
+              onClick={() =>
+                nav.current?.scrollBy({
+                  left: overflow.horizontal ? 180 : 0,
+                  top: overflow.horizontal ? 0 : 180,
+                  behavior: 'smooth',
+                })
+              }
+            >
+              <Icon name="chevron_down" />
+            </button>
+          ) : null}
+        </div>
+        {panel || (tool === 'select' && layer) ? (
           <section
             className="rie-options"
             data-testid="native-tool-options"
@@ -940,11 +1855,99 @@ export function EditorUI({
             cropRatio={ratio}
             onCrop={setCrop}
             onText={editText}
+            compare={compare}
+            onViewChange={setView}
+            onCropApply={closePanel}
+            onCropCancel={cancelCrop}
+            shape={shape}
+            redaction={redaction}
+            onImportImage={
+              state.options.features?.imageEditor?.tools?.stickers === false
+                ? undefined
+                : (file) => void importImage(file)
+            }
             t={t}
           />
         ) : (
           <div className="rie-canvas-wrap" />
         )}
+      </div>
+      <div className="rie-statusbar">
+        <div className="rie-status-context">
+          <span className="rie-dimensions" aria-label={t('toolbar.dimensions')}>
+            {doc ? `${doc.width} × ${doc.height}` : ''}
+          </span>
+          {compare ? (
+            <span className="rie-original-label">{t('toolbar.original')}</span>
+          ) : (
+            <span className="rie-tool-hint">
+              {[
+                'crop',
+                'draw',
+                'text',
+                'shapes',
+                'redact',
+                'stickers',
+              ].includes(tool)
+                ? t(`${tool === 'text' ? 'text' : tool}.hint`)
+                : ''}
+            </span>
+          )}
+        </div>
+        <div className="rie-toolbar-group">
+          <button
+            type="button"
+            className="rie-icon-button"
+            aria-label={t('toolbar.zoom_out')}
+            title={t('toolbar.zoom_out')}
+            disabled={disabled}
+            onClick={() => surface.current?.zoom(0.8)}
+          >
+            <Icon name="zoom_out" />
+          </button>
+          <button
+            type="button"
+            className="rie-zoom-level"
+            title={t('toolbar.actual_size')}
+            aria-label={`${t('toolbar.actual_size')}: ${Math.round(view.zoom * 100)}%`}
+            onClick={() => surface.current?.actualSize()}
+          >
+            {Math.round(view.zoom * 100)}%
+          </button>
+          <button
+            type="button"
+            className="rie-icon-button"
+            aria-label={t('toolbar.zoom_in')}
+            title={t('toolbar.zoom_in')}
+            disabled={disabled}
+            onClick={() => surface.current?.zoom(1.25)}
+          >
+            <Icon name="zoom_in" />
+          </button>
+          <button
+            type="button"
+            className="rie-icon-button"
+            aria-label={t('toolbar.fit_to_screen')}
+            title={t('toolbar.fit_to_screen')}
+            disabled={disabled}
+            onClick={() => surface.current?.fit()}
+          >
+            <Icon name="fit_to_screen" />
+          </button>
+          <button
+            type="button"
+            className="rie-icon-button rie-help-button"
+            aria-label={t('toolbar.shortcuts')}
+            title={t('toolbar.shortcuts')}
+            aria-expanded={helpOpen}
+            onClick={() => {
+              setHelpOpen(!helpOpen);
+              setExportOpen(false);
+            }}
+          >
+            <Icon name="help" />
+          </button>
+        </div>
       </div>
     </div>
   );

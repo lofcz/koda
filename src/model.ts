@@ -3,9 +3,10 @@ export type Point = { x: number; y: number };
 export type Matrix = readonly [number, number, number, number, number, number];
 export type Rect = Point & { width: number; height: number };
 export type ShapeKind = 'rectangle' | 'ellipse' | 'triangle' | 'line' | 'arrow';
+export type LineEnd = 'none' | 'arrow' | 'circle' | 'square';
 export type Layer = {
   id: string;
-  kind: 'path' | 'text' | ShapeKind;
+  kind: 'path' | 'text' | 'image' | 'redaction' | ShapeKind;
   matrix: Matrix;
   width: number;
   height: number;
@@ -20,12 +21,60 @@ export type Layer = {
   fontFamily?: string;
   bold?: boolean;
   italic?: boolean;
+  underline?: boolean;
+  textAlign?: 'left' | 'center' | 'right';
+  lineHeight?: number;
+  arrowStart?: LineEnd;
+  arrowEnd?: LineEnd;
+  imageSource?: string;
+  redactionMode?: 'pixelate' | 'blur' | 'solid';
+  redactionSize?: number;
+  /** Locked layers render normally, but cannot be selected or edited by gestures. */
+  locked?: boolean;
+  hidden?: boolean;
 };
 export type Effects = {
-  preset: 'none' | 'grayscale' | 'sepia' | 'invert' | 'vintage';
+  preset:
+    | 'none'
+    | 'grayscale'
+    | 'sepia'
+    | 'invert'
+    | 'vintage'
+    | 'warm'
+    | 'cool'
+    | 'noir'
+    | 'fade'
+    | 'chrome'
+    | 'pastel'
+    | 'stark'
+    | 'wash'
+    | 'sepiaBlues'
+    | 'sepiaColor'
+    | 'sepiaRust';
   brightness: number;
   contrast: number;
   saturation: number;
+  exposure: number;
+  gamma: number;
+  temperature: number;
+  clarity: number;
+  vignette: number;
+};
+export type Frame = {
+  style:
+    | 'none'
+    | 'solid'
+    | 'inset'
+    | 'double'
+    | 'mat'
+    | 'polaroid'
+    | 'bevel'
+    | 'hooks'
+    | 'cross'
+    | 'edge';
+  color: string;
+  /** Width in document pixels, drawn inside the image. */
+  width: number;
 };
 export type ImageDocument = {
   width: number;
@@ -33,6 +82,9 @@ export type ImageDocument = {
   imageMatrix: Matrix;
   layers: readonly Layer[];
   effects: Effects;
+  background: string;
+  frame: Frame;
+  cornerRadius: number;
 };
 export const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
 export const DEFAULT_EFFECTS: Effects = {
@@ -40,6 +92,16 @@ export const DEFAULT_EFFECTS: Effects = {
   brightness: 0,
   contrast: 0,
   saturation: 0,
+  exposure: 0,
+  gamma: 0,
+  temperature: 0,
+  clarity: 0,
+  vignette: 0,
+};
+export const DEFAULT_FRAME: Frame = {
+  style: 'none',
+  color: '#ffffff',
+  width: 16,
 };
 export const MAX_DIMENSION = 8192;
 export const MAX_PIXELS = 32 * 1024 * 1024;
@@ -57,7 +119,10 @@ export function dimensions(width: number, height: number) {
     width * height > MAX_PIXELS
   )
     throw new Error('Invalid image dimensions');
-  return { width: Math.round(width), height: Math.round(height) };
+  const size = { width: Math.round(width), height: Math.round(height) };
+  if (size.width * size.height > MAX_PIXELS)
+    throw new Error('Invalid image dimensions');
+  return size;
 }
 export function createDocument(width: number, height: number): ImageDocument {
   return {
@@ -65,6 +130,9 @@ export function createDocument(width: number, height: number): ImageDocument {
     imageMatrix: IDENTITY,
     layers: [],
     effects: DEFAULT_EFFECTS,
+    background: 'transparent',
+    frame: DEFAULT_FRAME,
+    cornerRadius: 0,
   };
 }
 export function multiply(a: Matrix, b: Matrix): Matrix {
@@ -124,12 +192,18 @@ export function resizeDocument(
 ): ImageDocument {
   const size = dimensions(width, height);
   if (size.width === doc.width && size.height === doc.height) return doc;
-  return transformDocument(
+  const resized = transformDocument(
     doc,
     scale(size.width / doc.width, size.height / doc.height),
     size.width,
     size.height
   );
+  const factor = Math.min(size.width / doc.width, size.height / doc.height);
+  return {
+    ...resized,
+    frame: { ...doc.frame, width: doc.frame.width * factor },
+    cornerRadius: doc.cornerRadius * factor,
+  };
 }
 export function cropDocument(doc: ImageDocument, rect: Rect): ImageDocument {
   const x = clamp(Math.round(rect.x), 0, doc.width - 1),
@@ -158,6 +232,39 @@ export function flipDocument(
   return transformDocument(
     doc,
     horizontal ? [-1, 0, 0, 1, doc.width, 0] : [1, 0, 0, -1, 0, doc.height]
+  );
+}
+/** Rotate the entire editable composition around its center, retaining every layer. */
+export function straightenDocument(
+  doc: ImageDocument,
+  angle: number,
+  expand = false
+): ImageDocument {
+  if (!Number.isFinite(angle)) throw new Error('Invalid rotation');
+  if (angle % 360 === 0) return doc;
+  const rotated = rotation(angle);
+  const width = expand
+      ? Math.ceil(
+          Math.abs(rotated[0]) * doc.width +
+            Math.abs(rotated[2]) * doc.height -
+            1e-9
+        )
+      : doc.width,
+    height = expand
+      ? Math.ceil(
+          Math.abs(rotated[1]) * doc.width +
+            Math.abs(rotated[3]) * doc.height -
+            1e-9
+        )
+      : doc.height;
+  return transformDocument(
+    doc,
+    multiply(
+      translate(width / 2, height / 2),
+      multiply(rotated, translate(-doc.width / 2, -doc.height / 2))
+    ),
+    width,
+    height
   );
 }
 export function updateLayer(
@@ -196,6 +303,58 @@ export function rotateLayer(layer: Layer, angle: number): Layer {
       layer.matrix
     ),
   };
+}
+export function flipLayer(layer: Layer, horizontal: boolean): Layer {
+  return {
+    ...layer,
+    matrix: multiply(
+      layer.matrix,
+      horizontal
+        ? [-1, 0, 0, 1, layer.width, 0]
+        : [1, 0, 0, -1, 0, layer.height]
+    ),
+  };
+}
+export function duplicateLayer(doc: ImageDocument, id: string): ImageDocument {
+  const index = doc.layers.findIndex((layer) => layer.id === id);
+  if (index < 0) return doc;
+  const layer = doc.layers[index];
+  const copy = {
+    ...layer,
+    id: crypto.randomUUID(),
+    locked: false,
+    matrix: multiply(translate(20, 20), layer.matrix),
+  };
+  return {
+    ...doc,
+    layers: [
+      ...doc.layers.slice(0, index + 1),
+      copy,
+      ...doc.layers.slice(index + 1),
+    ],
+  };
+}
+export function reorderLayer(
+  doc: ImageDocument,
+  id: string,
+  direction: 'front' | 'back' | 'forward' | 'backward'
+): ImageDocument {
+  const index = doc.layers.findIndex((layer) => layer.id === id);
+  if (index < 0) return doc;
+  const target =
+    direction === 'front'
+      ? doc.layers.length - 1
+      : direction === 'back'
+        ? 0
+        : clamp(
+            index + (direction === 'forward' ? 1 : -1),
+            0,
+            doc.layers.length - 1
+          );
+  if (index === target) return doc;
+  const layers = [...doc.layers];
+  layers.splice(target, 0, ...layers.splice(index, 1));
+  return { ...doc, layers };
 }
 /** Corner resize is anchored at the opposite corner, including rotated/sheared layers. */
 export function resizeLayer(
@@ -241,6 +400,7 @@ function segmentDistance(p: Point, a: Point, b: Point) {
 }
 /** Accurate path/ellipse/line hit testing; transparent areas do not steal clicks. */
 export function hitLayer(layer: Layer, point: Point, tolerance = 4): boolean {
+  if (layer.hidden || layer.locked || layer.opacity <= 0) return false;
   if (
     Math.abs(
       layer.matrix[0] * layer.matrix[3] - layer.matrix[1] * layer.matrix[2]
@@ -248,8 +408,21 @@ export function hitLayer(layer: Layer, point: Point, tolerance = 4): boolean {
   )
     return false;
   const p = transform(inverse(layer.matrix), point);
-  const localTolerance =
-    tolerance / Math.max(0.01, Math.hypot(layer.matrix[0], layer.matrix[1]));
+  // The smallest singular value keeps a usable target after nonuniform scaling.
+  const [a, b, c, d] = layer.matrix,
+    trace = a * a + b * b + c * c + d * d,
+    determinant = a * d - b * c,
+    minScale = Math.sqrt(
+      Math.max(
+        0,
+        (trace -
+          Math.sqrt(
+            Math.max(0, trace * trace - 4 * determinant * determinant)
+          )) /
+          2
+      )
+    );
+  const localTolerance = tolerance / Math.max(0.01, minScale);
   const stroke = layer.strokeWidth / 2 + localTolerance;
   if (layer.kind === 'path') {
     const points = layer.points ?? [];
@@ -348,6 +521,231 @@ export function pathLayer(
   };
 }
 
+/** Parse persisted state into an independent, validated document before replacing a draft. */
+export function parseDocument(input: unknown): ImageDocument {
+  const value: unknown = typeof input === 'string' ? JSON.parse(input) : input;
+  const object = (v: unknown): Record<string, unknown> => {
+    if (!v || typeof v !== 'object' || Array.isArray(v))
+      throw new Error('Invalid editor document');
+    return v as Record<string, unknown>;
+  };
+  const number = (
+    v: unknown,
+    min: number,
+    max: number,
+    fallback?: number
+  ): number => {
+    if (v === undefined && fallback !== undefined) return fallback;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < min || v > max)
+      throw new Error('Invalid document number');
+    return v;
+  };
+  const string = (v: unknown, fallback = '', max = 1000000): string => {
+    if (v === undefined) return fallback;
+    if (typeof v !== 'string' || v.length > max)
+      throw new Error('Invalid document string');
+    return v;
+  };
+  const choice = <const T extends string>(
+    v: unknown,
+    options: readonly T[],
+    fallback: T
+  ): T => {
+    if (v === undefined) return fallback;
+    if (typeof v !== 'string' || !options.includes(v as T))
+      throw new Error('Invalid document option');
+    return v as T;
+  };
+  const matrix = (v: unknown): Matrix => {
+    if (!Array.isArray(v) || v.length !== 6)
+      throw new Error('Invalid document transform');
+    const m = v.map((n) => number(n, -1e8, 1e8)) as unknown as Matrix;
+    inverse(m);
+    return m;
+  };
+  const doc = object(value);
+  const result = createDocument(
+    number(doc.width, 1, MAX_DIMENSION),
+    number(doc.height, 1, MAX_DIMENSION)
+  );
+  result.imageMatrix = matrix(doc.imageMatrix);
+  result.background = string(doc.background, 'transparent', 256);
+  result.cornerRadius = number(doc.cornerRadius, 0, MAX_DIMENSION, 0);
+  const effect = doc.effects === undefined ? {} : object(doc.effects);
+  result.effects = {
+    ...DEFAULT_EFFECTS,
+    preset: choice(
+      effect.preset,
+      [
+        'none',
+        'grayscale',
+        'sepia',
+        'invert',
+        'vintage',
+        'warm',
+        'cool',
+        'noir',
+        'fade',
+        'chrome',
+        'pastel',
+        'stark',
+        'wash',
+        'sepiaBlues',
+        'sepiaColor',
+        'sepiaRust',
+      ],
+      'none'
+    ),
+  };
+  for (const key of [
+    'brightness',
+    'contrast',
+    'saturation',
+    'exposure',
+    'gamma',
+    'temperature',
+    'clarity',
+    'vignette',
+  ] as const)
+    result.effects[key] = number(effect[key], -100, 100, 0);
+  const frame = doc.frame === undefined ? {} : object(doc.frame);
+  result.frame = {
+    style: choice(
+      frame.style,
+      [
+        'none',
+        'solid',
+        'inset',
+        'double',
+        'mat',
+        'polaroid',
+        'bevel',
+        'hooks',
+        'cross',
+        'edge',
+      ],
+      'none'
+    ),
+    color: string(frame.color, DEFAULT_FRAME.color, 256),
+    width: number(frame.width, 0, MAX_DIMENSION, DEFAULT_FRAME.width),
+  };
+  if (!Array.isArray(doc.layers) || doc.layers.length > 10000)
+    throw new Error('Invalid document layers');
+  const ids = new Set<string>();
+  let pointCount = 0;
+  result.layers = doc.layers.map((input) => {
+    const v = object(input),
+      id = string(v.id, '', 256);
+    if (!id || ids.has(id)) throw new Error('Invalid layer identifier');
+    ids.add(id);
+    const layer: Layer = {
+      id,
+      kind: choice(
+        v.kind,
+        [
+          'path',
+          'text',
+          'image',
+          'redaction',
+          'rectangle',
+          'ellipse',
+          'triangle',
+          'line',
+          'arrow',
+        ],
+        'rectangle'
+      ),
+      matrix: matrix(v.matrix),
+      width: number(v.width, 0.001, 1e7),
+      height: number(v.height, 0.001, 1e7),
+      color: string(v.color, '#000000', 256),
+      fill: string(v.fill, 'transparent', 256),
+      strokeWidth: number(v.strokeWidth, 0, MAX_DIMENSION, 0),
+      opacity: number(v.opacity, 0, 1, 1),
+    };
+    for (const key of [
+      'erase',
+      'bold',
+      'italic',
+      'underline',
+      'locked',
+      'hidden',
+    ] as const) {
+      if (v[key] !== undefined) {
+        if (typeof v[key] !== 'boolean') throw new Error('Invalid layer flag');
+        layer[key] = v[key];
+      }
+    }
+    if (v.points !== undefined) {
+      if (!Array.isArray(v.points) || (pointCount += v.points.length) > 1000000)
+        throw new Error('Invalid layer points');
+      layer.points = v.points.map((input) => {
+        const p = object(input);
+        return { x: number(p.x, -1e7, 1e7), y: number(p.y, -1e7, 1e7) };
+      });
+    }
+    if (layer.kind === 'text') {
+      layer.text = string(v.text);
+      layer.fontFamily = string(v.fontFamily, 'sans-serif', 512);
+      layer.fontSize = number(v.fontSize, 1, MAX_DIMENSION, 40);
+      layer.lineHeight = number(v.lineHeight, 0.5, 5, 1.2);
+      layer.textAlign = choice(
+        v.textAlign,
+        ['left', 'center', 'right'],
+        'left'
+      );
+    }
+    if (layer.kind === 'line' || layer.kind === 'arrow') {
+      layer.arrowStart = choice(
+        v.arrowStart,
+        ['none', 'arrow', 'circle', 'square'],
+        'none'
+      );
+      layer.arrowEnd = choice(
+        v.arrowEnd,
+        ['none', 'arrow', 'circle', 'square'],
+        layer.kind === 'arrow' ? 'arrow' : 'none'
+      );
+    }
+    if (layer.kind === 'image') {
+      const source = string(v.imageSource, '', 64 * 1024 * 1024);
+      if (
+        !/^(data:image\/(?:png|jpe?g|webp|gif|avif|bmp);base64,|https?:\/\/|blob:)/i.test(
+          source
+        )
+      )
+        throw new Error('Invalid image layer source');
+      layer.imageSource = source;
+    }
+    if (layer.kind === 'redaction') {
+      layer.redactionMode = choice(
+        v.redactionMode,
+        ['pixelate', 'blur', 'solid'],
+        'pixelate'
+      );
+      layer.redactionSize = number(v.redactionSize, 1, 512, 16);
+    }
+    return layer;
+  });
+  return result;
+}
+
+function equalValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  const left = Object.keys(a),
+    right = Object.keys(b);
+  if (left.length !== right.length) return false;
+  return left.every(
+    (key) =>
+      Object.prototype.hasOwnProperty.call(b, key) &&
+      equalValue(
+        (a as Record<string, unknown>)[key],
+        (b as Record<string, unknown>)[key]
+      )
+  );
+}
+
 /** One pointer gesture is one history entry, regardless of pointer sample count. */
 export class DocumentHistory {
   past: ImageDocument[] = [];
@@ -375,7 +773,7 @@ export class DocumentHistory {
   commit(next = this.current) {
     const before = this.transaction ?? this.current;
     this.transaction = null;
-    if (before === next || JSON.stringify(before) === JSON.stringify(next)) {
+    if (equalValue(before, next)) {
       this.current = before;
       return false;
     }
