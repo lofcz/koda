@@ -64,6 +64,8 @@ The component works out of the box in React Server Components environments (e.g.
 | `onCancel`         | `() => void`                  | Called when the user cancels editing.                                                                                                                                                  |
 | `onLoadError`      | `() => void`                  | Called when the image fails to load into the canvas (CORS, 404, decode error).                                                                                                         |
 | `onError`          | `(error: Error) => void`      | Wrapper-level failures: embed script load, editor creation, or image reset. Falls back to `console.error` when absent.                                                                 |
+| `loadingFallback` | `ReactNode` | UI shown while the editor initializes. |
+| `errorFallback` | `ReactNode` or `(error, retry) => ReactNode` | Retryable initialization error UI. |
 
 ## Editor instance (ref)
 
@@ -119,6 +121,25 @@ and the wrapper, so a stylesheet can target what the embed renders inside them:
 
 The embed's own class names are not part of this component's API — pin `scriptUrl` to a specific
 editor version before depending on them.
+
+## Loading and error UI
+
+The editor shows a built-in loading message while its CDN script and instance
+initialize, and a built-in retryable error message if initialization fails. Use
+fallbacks to match your application's UI:
+
+```tsx
+<ImageEditor
+  image={url}
+  loadingFallback={<Spinner label="Loading editor" />}
+  errorFallback={(error, retry) => (
+    <section role="alert">
+      <p>Could not load the editor: {error.message}</p>
+      <button onClick={retry}>Try again</button>
+    </section>
+  )}
+/>
+```
 
 ## Error handling
 

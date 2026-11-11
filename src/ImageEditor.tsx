@@ -27,6 +27,11 @@ function ImageEditorInner(
   } = props;
 
   const [editor, setEditor] = useState<ImageEditorInstance | null>(null);
+  const [isInitializing, setIsInitializing] = useState(true);
+  const [initializationError, setInitializationError] = useState<Error | null>(
+    null
+  );
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const generatedId = useId();
@@ -72,6 +77,12 @@ function ImageEditorInner(
     } else {
       console.error('[react-image-editor]', err);
     }
+  };
+
+  const retry = () => {
+    setInitializationError(null);
+    setIsInitializing(true);
+    setRetryAttempt((attempt) => attempt + 1);
   };
 
   // theme/locale/translations apply via updateOptions; everything else in
@@ -141,6 +152,7 @@ function ImageEditorInner(
           mountOptions.translations,
         ]);
         setEditor(created);
+        setIsInitializing(false);
         // The editor mounted successfully, so a throw from the consumer's
         // callback must not reach the terminal .catch below, where it would
         // surface as a wrapper failure and could hard-reset the loader.
@@ -161,13 +173,20 @@ function ImageEditorInner(
         if (!window.__ImageEditorImpl__) {
           resetLoader(scriptUrl);
         }
-        fail(error);
+        if (!cancelled) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          setInitializationError(err);
+          setIsInitializing(false);
+          fail(err);
+        }
       });
 
     return () => {
       cancelled = true;
       editorRef.current = null;
       setEditor(null);
+      setIsInitializing(true);
+      setInitializationError(null);
       chainRef.current = chainRef.current
         .then(() => {
           instance?.destroy();
@@ -175,7 +194,7 @@ function ImageEditorInner(
         })
         .catch(fail);
     };
-  }, [scriptUrl, remountKey]);
+  }, [scriptUrl, remountKey, retryAttempt]);
 
   // Image changes apply through the chain as serialized resets: the
   // underlying reset is deeply async, so un-serialized resets could finish
@@ -223,6 +242,23 @@ function ImageEditorInner(
   // horizontal scrollbar and the tool rail is pushed out of view — instead of
   // scrolling inside the panel. With them, any container constrains the
   // editor and responsive tweaks are a breakpoint away.
+  const fallback = initializationError
+    ? typeof props.errorFallback === 'function'
+      ? props.errorFallback(initializationError, retry)
+      : (props.errorFallback ?? (
+          <div role="alert">
+            <p>Unable to load the image editor.</p>
+            <button type="button" onClick={retry}>
+              Try again
+            </button>
+          </div>
+        ))
+    : isInitializing
+      ? (props.loadingFallback ?? (
+          <div role="status">Loading image editor…</div>
+        ))
+      : null;
+
   return (
     <div
       className={wrapperClassName}
@@ -231,6 +267,7 @@ function ImageEditorInner(
         display: 'flex',
         minWidth: 0,
         minHeight: minHeight,
+        position: 'relative',
         ...wrapperStyle,
       }}
     >
@@ -246,6 +283,18 @@ function ImageEditorInner(
         // flex and minWidth first: defaults the consumer's style can override.
         style={{ flex: 1, minWidth: 0, ...style }}
       />
+      {fallback && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'grid',
+            placeItems: 'center',
+          }}
+        >
+          {fallback}
+        </div>
+      )}
     </div>
   );
 }
