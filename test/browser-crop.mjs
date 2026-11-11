@@ -350,16 +350,31 @@ try {
 
   // Disabled source zoom also disables wheel and keyboard zoom without changing viewport.
   await restore(initial, { enableZoom: false });
+  // Opening crop controls resizes the canvas host; the viewport refits on a
+  // later ResizeObserver tick, so take the baseline once it is stable.
+  const stableZoom = () =>
+    page.evaluate(async () => {
+      const read = () =>
+        document.querySelector('[data-zoom]').getAttribute('data-zoom');
+      let last = read(),
+        same = 0;
+      for (let i = 0; i < 120 && same < 5; i++) {
+        await new Promise(requestAnimationFrame);
+        const next = read();
+        same = next === last ? same + 1 : 0;
+        last = next;
+      }
+      return last;
+    });
   const disabledZoom = await doc(),
-    viewportZoom = await surface.getAttribute('data-zoom');
+    viewportZoom = await stableZoom();
   const middle = await world(300, 200);
   await page.mouse.move(middle.x, middle.y);
   await page.mouse.wheel(0, -180);
   await surface.focus();
   await page.keyboard.press('+');
-  await page.evaluate(() => new Promise(requestAnimationFrame));
+  assert.equal(await stableZoom(), viewportZoom);
   assert.deepEqual(await doc(), disabledZoom);
-  assert.equal(await surface.getAttribute('data-zoom'), viewportZoom);
 
   // Outside selection keeps negative origin; required ratios beat Shift and all handles.
   console.info('crop: outside selection and required ratio');
