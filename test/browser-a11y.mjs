@@ -175,7 +175,9 @@ try {
       ]
     : [])
     for (const theme of ['light', 'dark']) {
-      console.info(`axe: ${viewport.name} ${theme}`);
+      console.info(
+        `axe: ${viewport.name} ${theme} (${violations.length} violations so far)`
+      );
       await page.setViewportSize(viewport);
       await options({ theme, locale: 'en' });
       for (const tool of tools) {
