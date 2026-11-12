@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { isChromium, launchBrowser, skipped } from './browser-env.mjs';
 
 const port = Number(process.env.EDITOR_RICH_TEXT_PORT ?? 4242),
   base = `http://127.0.0.1:${port}`;
@@ -48,10 +48,7 @@ try {
     if (i === 119) throw new Error(log);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.CHROMIUM_PATH,
-  });
+  browser = await launchBrowser();
   const page = await browser.newPage({
     viewport: { width: 1180, height: 820 },
   });
@@ -110,13 +107,16 @@ try {
         const data = new DataTransfer();
         if (html) data.setData('text/html', html);
         data.setData('text/plain', plain);
-        element.dispatchEvent(
-          new ClipboardEvent('paste', {
-            clipboardData: data,
-            bubbles: true,
-            cancelable: true,
-          })
-        );
+        const event = new ClipboardEvent('paste', {
+          clipboardData: data,
+          bubbles: true,
+          cancelable: true,
+        });
+        // Firefox ignores clipboardData in the constructor; a real paste
+        // carries it, so attach it the same way on every engine.
+        if (event.clipboardData !== data)
+          Object.defineProperty(event, 'clipboardData', { value: data });
+        element.dispatchEvent(event);
       },
       { html, plain }
     );
@@ -157,7 +157,16 @@ try {
       .fontWeight,
     700
   );
-  assert.equal((await layer()).textRuns.at(-1).style.fontWeight, 400);
+  // Unformatted runs may omit styles that equal the layer defaults: Firefox's
+  // fill commits through an IME composition, which reads the DOM, while
+  // Chromium's goes through beforeinput and stores the resolved caret style.
+  const unformatted = await layer();
+  assert.equal(
+    unformatted.textRuns.at(-1).style?.fontWeight ??
+      unformatted.fontWeight ??
+      (unformatted.bold ? 700 : 400),
+    400
+  );
   await page.getByTestId('native-text-size').fill('32');
   assert.equal(
     await page
@@ -223,17 +232,26 @@ try {
   );
   assert.deepEqual(remote, []);
 
-  // Real Chromium IME events remain in the same transaction and never duplicate composition text.
+  // Real IME events remain in the same transaction and never duplicate composition text.
   await begin();
   await selectRange(input, 0, (await layer()).text.length);
-  const beforeIme = await count(),
-    cdp = await page.context().newCDPSession(page);
-  await cdp.send('Input.imeSetComposition', {
-    text: '漢',
-    selectionStart: 1,
-    selectionEnd: 1,
-  });
-  await cdp.send('Input.insertText', { text: '漢字' });
+  const beforeIme = await count();
+  if (isChromium) {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.imeSetComposition', {
+      text: '漢',
+      selectionStart: 1,
+      selectionEnd: 1,
+    });
+    await cdp.send('Input.insertText', { text: '漢字' });
+    await cdp.detach();
+  } else {
+    // Firefox and WebKit have no Playwright composition API. Commit the same
+    // CJK text through the engine's native insertText path instead, which
+    // still checks the single-transaction contract without the IME session.
+    skipped('IME composition session', 'Input.imeSetComposition is CDP-only');
+    await page.keyboard.insertText('漢字');
+  }
   assert.equal((await layer()).text, '漢字');
   assert.equal(await count(), beforeIme);
   await page.keyboard.press('Control+Enter');
@@ -243,7 +261,6 @@ try {
     await page.evaluate(() => window.localEditor.getDocument()),
     exported
   );
-  await cdp.detach();
 
   // A restored document wins over a stale editor/composition, even when exported immediately.
   await begin();

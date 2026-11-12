@@ -114,6 +114,14 @@ export const RichTextInput = forwardRef<
   const range = useRef<TextSelection>({ anchor: 0, focus: 0 });
   const typing = useRef<TextStyle | null>(null),
     composing = useRef(false);
+  // The marks typed text would get, captured when an IME session starts: the
+  // session moves the DOM caret before the composed text exists.
+  const composition = useRef<{
+    text: string;
+    start: number;
+    end: number;
+    marks: TextStyle;
+  } | null>(null);
   const past = useRef<{ value: RichTextValue; selection: TextSelection }[]>([]);
   const future = useRef<{ value: RichTextValue; selection: TextSelection }[]>(
     []
@@ -383,10 +391,55 @@ export const RichTextInput = forwardRef<
       onInput={() => flush()}
       onCompositionStart={() => {
         composing.current = true;
+        const selected =
+          (root.current && domSelection(root.current)) ?? range.current;
+        composition.current = {
+          text: current.current.text,
+          start: Math.min(selected.anchor, selected.focus),
+          end: Math.max(selected.anchor, selected.focus),
+          marks:
+            typing.current ??
+            (Object.fromEntries(
+              Object.entries(
+                selectedTextStyle(
+                  current.current,
+                  selected,
+                  latest.current.defaults
+                )
+              ).filter(([, value]) => value !== null)
+            ) as TextStyle),
+        };
       }}
       onCompositionEnd={() => {
         composing.current = false;
+        const pending = composition.current;
+        composition.current = null;
         flush();
+        if (!pending) return;
+        // IME commits bypass beforeinput. Give the composed text the marks
+        // typed text gets: pending caret marks (Italic toggled with nothing
+        // selected) or the style of the selection it replaced.
+        const before = pending.text,
+          after = current.current.text,
+          length = after.length - before.length + pending.end - pending.start;
+        if (
+          length > 0 &&
+          after.startsWith(before.slice(0, pending.start)) &&
+          after.endsWith(before.slice(pending.end))
+        ) {
+          if (typing.current === null && pending.start === pending.end)
+            typing.current = pending.marks;
+          publish(
+            formatRichText(
+              current.current,
+              { anchor: pending.start, focus: pending.start + length },
+              pending.marks
+            ),
+            range.current,
+            true,
+            false
+          );
+        }
       }}
       onPaste={(event) => {
         event.preventDefault();

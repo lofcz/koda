@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { launchBrowser } from './browser-env.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = Number(process.env.EDITOR_CORE_PORT ?? 4199);
@@ -33,10 +33,7 @@ try {
       throw new Error(serverLog || 'Core test server did not start');
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.CHROMIUM_PATH,
-  });
+  browser = await launchBrowser();
   const page = await browser.newPage();
   await page.route('**/core-check.html', (route) =>
     route.fulfill({
@@ -187,6 +184,13 @@ try {
     check(
       pixel(canvas, 10, 10)[0] > 80 && pixel(canvas, 10, 10)[0] < 180,
       'Pixelation samples underlying photo'
+    );
+    // A whole 8x8 checkerboard block averages to mid grey on every engine,
+    // independent of the browser's downscaling filter.
+    check(
+      Math.abs(pixel(canvas, 10, 10)[0] - 127.5) <= 1 &&
+        pixel(canvas, 10, 10)[3] === 255,
+      'Pixelation is the mean of every pixel in its block'
     );
     equal(
       pixel(canvas, 2, 2),
@@ -491,6 +495,98 @@ try {
         pixel(canvas, 6, 16)[3] < pixel(canvas, 16, 16)[3],
       'Shape feather creates a soft transparent edge'
     );
+    // Zoomed out, the preview composes at about display resolution. Effects,
+    // feather, text shadow, erasing and redaction must match the full export
+    // scaled to the same size.
+    {
+      const big = make(512, 384),
+        bigContext = big.getContext('2d');
+      for (let y = 0; y < 384; y += 32)
+        for (let x = 0; x < 512; x += 32) {
+          bigContext.fillStyle = `hsl(${(x + y) % 360},70%,50%)`;
+          bigContext.fillRect(x, y, 32, 32);
+        }
+      const scene = {
+        ...model.createDocument(512, 384),
+        effects: { ...model.DEFAULT_EFFECTS, brightness: 20, contrast: 15 },
+        layers: [
+          {
+            ...rectangle,
+            id: 'soft',
+            matrix: model.translate(40, 40),
+            width: 160,
+            height: 120,
+            fill: '#ffffff',
+            feather: 12,
+          },
+          {
+            ...rectangle,
+            id: 'label',
+            kind: 'text',
+            text: 'Preview',
+            fontSize: 64,
+            matrix: model.translate(220, 60),
+            width: 260,
+            height: 80,
+            fill: 'transparent',
+            color: '#ffffff',
+            textOutline: { color: '#000000', width: 3 },
+            textShadow: { color: '#ff0000', blur: 8, offsetX: 16, offsetY: 12 },
+          },
+          {
+            ...model.pathLayer(
+              [
+                { x: 40, y: 300 },
+                { x: 470, y: 300 },
+              ],
+              {
+                id: 'erase',
+                color: '#000000',
+                strokeWidth: 24,
+                opacity: 1,
+                erase: true,
+              }
+            ),
+          },
+          {
+            ...rectangle,
+            id: 'blurred',
+            kind: 'redaction',
+            matrix: model.translate(300, 200),
+            width: 160,
+            height: 80,
+            redactionMode: 'pixelate',
+            redactionSize: 24,
+          },
+        ],
+      };
+      const exported = render.exportCanvas(scene, big),
+        expected = make(128, 96),
+        actual = make(128, 96);
+      expected.getContext('2d').imageSmoothingQuality = 'high';
+      expected.getContext('2d').drawImage(exported, 0, 0, 128, 96);
+      render.paintDocument(
+        actual.getContext('2d'),
+        scene,
+        big,
+        [0.25, 0, 0, 0.25, 0, 0]
+      );
+      const a = actual.getContext('2d').getImageData(0, 0, 128, 96).data,
+        e = expected.getContext('2d').getImageData(0, 0, 128, 96).data;
+      let total = 0,
+        worst = 0;
+      for (let i = 0; i < a.length; i++) {
+        const delta = Math.abs(a[i] - e[i]);
+        total += delta;
+        worst = Math.max(worst, delta);
+      }
+      check(
+        total / a.length < 4,
+        `Reduced preview matches the scaled export (mean channel error ${(
+          total / a.length
+        ).toFixed(2)}, worst ${worst})`
+      );
+    }
 
     const { exifFixture } = await import(`/@fs${root}/test/exif-fixture.ts`),
       { readJpegExif } = await import(`/@fs${root}/src/jpegMetadata.ts`),

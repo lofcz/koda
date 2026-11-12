@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { createTouch, launchBrowser } from './browser-env.mjs';
 
 const port = Number(process.env.EDITOR_TEST_PORT ?? 4198),
   base = `http://127.0.0.1:${port}`;
@@ -40,10 +40,7 @@ try {
     if (i === 119) throw new Error(serverLog);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.CHROMIUM_PATH,
-  });
+  browser = await launchBrowser();
   const page = await browser.newPage({
       viewport: { width: 1100, height: 760 },
     }),
@@ -215,12 +212,12 @@ try {
     true
   );
   // Native touch events exercise pinch zoom and cancellation without changing pixels.
-  const cdp = await page.context().newCDPSession(page),
+  const touchInput = await createTouch(page),
     touch = async (type, points) =>
-      cdp.send('Input.dispatchTouchEvent', {
+      touchInput.send(
         type,
-        touchPoints: points.map(([x, y], id) => ({ x, y, id })),
-      });
+        points.map(([x, y], id) => ({ x, y, id }))
+      );
   const touchBox = await page.getByRole('application').boundingBox();
   assert(touchBox);
   const cx = touchBox.x + touchBox.width / 2,
@@ -257,7 +254,7 @@ try {
   assert.notEqual(await snapshot(), touchBefore);
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   assert.equal(await snapshot(), touchBefore);
-  await cdp.detach();
+  await touchInput.detach();
   // A failed replacement leaves the complete dirty draft available for continued editing.
   const draft = await snapshot();
   await page.route('**/missing.png', (route) =>

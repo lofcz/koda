@@ -14,7 +14,30 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  # Firefox and WebKit run beside the release job; it publishes only if both pass.
+  browsers:
+    if: github.repository == 'lofcz/react-image-editor' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        browser: [firefox, webkit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install -g pnpm@11.20.0
+      - run: pnpm install --frozen-lockfile
+      # Firefox and WebKit need system libraries the hosted image does not ship.
+      - run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+        timeout-minutes: 10
+      - run: pnpm run test:browser:${{ matrix.browser }}
+        timeout-minutes: 20
   release:
+    needs: browsers
     if: github.repository == 'lofcz/react-image-editor' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -35,6 +58,8 @@ jobs:
       - run: pnpm exec playwright install --only-shell chromium
         timeout-minutes: 5
       - run: pnpm run test:browser
+        timeout-minutes: 10
+      - run: pnpm run test:a11y
         timeout-minutes: 10
       - name: Bump and commit release
         id: release

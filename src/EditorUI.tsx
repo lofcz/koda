@@ -115,6 +115,18 @@ function colorKey(value: string | null): string | null {
   return color;
 }
 
+/** Spoken and visible name of a layer, shared by the layer list and announcements. */
+function layerLabel(item: Layer, t: (key: string) => string) {
+  return item.kind === 'text'
+    ? textContent(item) || t('tools.text')
+    : t(
+        item.kind === 'image' || item.kind === 'path'
+          ? `selection.${item.kind}`
+          : item.kind === 'redaction'
+            ? 'tools.redact'
+            : `shapes.${item.kind}`
+      );
+}
 function NumberField({
   label,
   value,
@@ -526,6 +538,7 @@ export function EditorUI({
       handle: RichTextInputHandle;
     } | null>(null),
     uploadField = useRef<HTMLInputElement>(null),
+    exportButton = useRef<HTMLButtonElement>(null),
     // Consecutive straighten edits compose from one base until another edit replaces the preview.
     straightening = useRef<{
       base: ImageDocument;
@@ -815,6 +828,46 @@ export function EditorUI({
   }, [tool, shape, pathState.drawing, pathState.editing]);
   const layer = doc?.layers.find((item) => item.id === state.selected);
   const selectedIds = state.selectedIds;
+  // Screen readers skip identical live-region text; alternate a trailing NBSP.
+  const selectionKey = selectedIds.join(' ');
+  const [live, setLive] = useState({ text: '', selection: selectionKey });
+  const spoken = (previous: string, text: string) =>
+    previous === text ? `${text}\u00a0` : text;
+  const announce = (text: string) =>
+    setLive((previous) => ({ ...previous, text: spoken(previous.text, text) }));
+  if (live.selection !== selectionKey) {
+    // Derived during render: announce selection changes, not document edits.
+    const picked =
+      doc?.layers.filter((item) => selectedIds.includes(item.id)) ?? [];
+    setLive({
+      selection: selectionKey,
+      text:
+        picked.length > 1
+          ? spoken(
+              live.text,
+              t('selection.count').replace('{count}', String(picked.length))
+            )
+          : picked[0]
+            ? spoken(
+                live.text,
+                t('announce.selected').replace(
+                  '{name}',
+                  layerLabel(picked[0], t)
+                )
+              )
+            : live.text,
+    });
+  }
+  const undo = () => {
+    if (!engine.getSnapshot().canUndo) return;
+    engine.undo();
+    announce(t('announce.undo'));
+  };
+  const redo = () => {
+    if (!engine.getSnapshot().canRedo) return;
+    engine.redo();
+    announce(t('announce.redo'));
+  };
   const selectedLayers =
     doc?.layers.filter((item) => selectedIds.includes(item.id)) ?? [];
   const isGroup = selectedLayers.length > 1;
@@ -1039,11 +1092,25 @@ export function EditorUI({
     setCompare(false);
     setError('');
   };
+  /** Keyboard users closing a panel or popover land back on its opener. */
+  const returnFocus = (from: string, to: HTMLElement | null | undefined) => {
+    if (shell.current?.querySelector(from)?.contains(document.activeElement))
+      to?.focus({ preventScroll: true });
+  };
+  const toolButton = (name: EditorTool) =>
+    nav.current?.querySelector<HTMLElement>(
+      `[data-testid="native-tool-${name}"]`
+    );
   const closePanel = () => {
     if (tool === 'crop' && !applyCrop()) return;
     if (tool === 'select') engine.select(null);
+    returnFocus('.rie-options', toolButton(tool));
     setTool('select');
     setPanel(false);
+  };
+  const closeExport = () => {
+    returnFocus('.rie-export-panel', exportButton.current);
+    setExportOpen(false);
   };
   const iconButton = (
     name: string,
@@ -1462,6 +1529,7 @@ export function EditorUI({
       engine.cancel();
     }
     straightening.current = null;
+    returnFocus('.rie-options', toolButton('crop'));
     setTool('select');
     setPanel(false);
   };
@@ -1486,7 +1554,7 @@ export function EditorUI({
   const groupControls =
     doc && isGroup ? (
       <div className="rie-stack" data-testid="native-group-controls">
-        <p className="rie-selection-count" role="status">
+        <p className="rie-selection-count">
           {t('selection.count').replace(
             '{count}',
             String(selectedLayers.length)
@@ -3456,8 +3524,10 @@ export function EditorUI({
       onKeyDown={(event) => {
         if (
           disabled ||
+          // Only text entry keeps native undo; sliders, checkboxes and
+          // color inputs still undo editor changes with the keyboard.
           (event.target as HTMLElement).matches(
-            'input,textarea,select,[contenteditable="true"]'
+            'input:not([type="range"],[type="checkbox"],[type="radio"],[type="color"],[type="button"]),textarea,select,[contenteditable="true"]'
           )
         )
           return;
@@ -3467,22 +3537,22 @@ export function EditorUI({
         ) {
           event.preventDefault();
           event.stopPropagation();
-          if (event.shiftKey) engine.redo();
-          else engine.undo();
+          if (event.shiftKey) redo();
+          else undo();
         }
         if (
           (event.ctrlKey || event.metaKey) &&
           event.key.toLowerCase() === 'y'
         ) {
           event.preventDefault();
-          engine.redo();
+          redo();
         }
         if (event.key === 'Escape' && tool === 'crop') {
           cancelCrop();
         }
         if (event.key === 'Escape') {
           setCompare(false);
-          setExportOpen(false);
+          closeExport();
           setHelpOpen(false);
         }
       }}
@@ -3493,18 +3563,8 @@ export function EditorUI({
         aria-label={t('toolbar.label')}
       >
         <div className="rie-toolbar-group">
-          {iconButton(
-            'undo',
-            'toolbar.undo',
-            () => engine.undo(),
-            !state.canUndo
-          )}
-          {iconButton(
-            'redo',
-            'toolbar.redo',
-            () => engine.redo(),
-            !state.canRedo
-          )}
+          {iconButton('undo', 'toolbar.undo', undo, !state.canUndo)}
+          {iconButton('redo', 'toolbar.redo', redo, !state.canRedo)}
           <button
             type="button"
             className="rie-icon-button"
@@ -3542,6 +3602,7 @@ export function EditorUI({
             type="button"
             className="rie-icon-button"
             data-testid="native-export-settings"
+            ref={exportButton}
             aria-label={t('export.title')}
             title={t('export.title')}
             aria-expanded={exportOpen}
@@ -3607,7 +3668,16 @@ export function EditorUI({
               }
             />
           ) : null}
-          {iconButton('close', 'toolbar.close', () => setExportOpen(false))}
+          <button
+            type="button"
+            className="rie-icon-button"
+            aria-label={t('toolbar.close')}
+            title={t('toolbar.close')}
+            disabled={disabled}
+            onClick={closeExport}
+          >
+            <Icon name="close" />
+          </button>
         </div>
       ) : null}
       {helpOpen ? (
@@ -3645,6 +3715,30 @@ export function EditorUI({
             className="rie-nav"
             data-testid="native-tool-nav"
             aria-label={t('toolbar.label')}
+            onKeyDown={(event) => {
+              const keys = ['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft'];
+              if (![...keys, 'Home', 'End'].includes(event.key)) return;
+              const buttons = [
+                  ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                    'button:not(:disabled)'
+                  ),
+                ],
+                index = buttons.indexOf(
+                  document.activeElement as HTMLButtonElement
+                );
+              if (!buttons.length) return;
+              event.preventDefault();
+              const next =
+                event.key === 'Home'
+                  ? 0
+                  : event.key === 'End'
+                    ? buttons.length - 1
+                    : (index +
+                        (keys.indexOf(event.key) < 2 ? 1 : -1) +
+                        buttons.length) %
+                      buttons.length;
+              buttons[next].focus();
+            }}
           >
             {toolNames
               .filter(
@@ -3876,6 +3970,15 @@ export function EditorUI({
           </button>
         </div>
       </div>
+      <p
+        className="rie-sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        data-testid="native-announcer"
+      >
+        {live.text}
+      </p>
     </div>
   );
 }

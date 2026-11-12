@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { createTouch, launchBrowser } from './browser-env.mjs';
 
 const port = Number(process.env.EDITOR_INTERACTIONS_PORT ?? 4202),
   base = `http://127.0.0.1:${port}`;
@@ -43,10 +43,7 @@ try {
     if (i === 119) throw new Error(log);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.CHROMIUM_PATH,
-  });
+  browser = await launchBrowser();
   const page = await browser.newPage({
       viewport: { width: 1100, height: 780 },
     }),
@@ -88,7 +85,14 @@ try {
   // Edge handles resize only their axis; Enter commits the pending crop exactly once.
   await page.getByTestId('native-tool-crop').click();
   let box = await frame();
-  await drag(box.x + box.width, box.y + box.height / 2, -box.width / 5, 30);
+  // Whole CSS pixels: Firefox truncates pointer coordinates, Chromium keeps
+  // fractions. A rounded -1/5 width drag lands within 0.5 px on both.
+  await drag(
+    Math.round(box.x + box.width),
+    Math.round(box.y + box.height / 2),
+    Math.round(-box.width / 5),
+    30
+  );
   await capture('interaction-crop.png');
   await page.keyboard.press('Enter');
   let doc = await document();
@@ -252,12 +256,12 @@ try {
   // Live touch promotion cancels the tentative stroke; remaining finger pans only.
   await reset();
   await page.getByTestId('native-tool-draw').click();
-  const cdp = await page.context().newCDPSession(page);
+  const touchInput = await createTouch(page);
   const touch = (type, points) =>
-    cdp.send('Input.dispatchTouchEvent', {
+    touchInput.send(
       type,
-      touchPoints: points.map(([x, y], id) => ({ x, y, id })),
-    });
+      points.map(([x, y], id) => ({ x, y, id }))
+    );
   box = await frame();
   const x = box.x + box.width * 0.3,
     y = box.y + box.height * 0.4;
@@ -292,7 +296,7 @@ try {
   await touch('touchMove', [[box.x + 100, box.y + 100]]);
   await touch('touchCancel', []);
   assert.equal((await document()).layers.length, 0);
-  await cdp.detach();
+  await touchInput.detach();
 
   // Redactions are direct-drag layers with the same cancellation and undo model.
   await reset();

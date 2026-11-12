@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { createTouch, launchBrowser, pointerQuantum } from './browser-env.mjs';
 
 const port = Number(process.env.EDITOR_PATH_SELECTION_PORT ?? 4232),
   base = `http://127.0.0.1:${port}`;
@@ -51,10 +51,7 @@ try {
     if (i === 119) throw new Error(log);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.CHROMIUM_PATH,
-  });
+  browser = await launchBrowser();
   const page = await browser.newPage({
       viewport: { width: 1180, height: 800 },
     }),
@@ -74,13 +71,38 @@ try {
   const ids = () =>
     page.evaluate(() => window.localEditor.getSnapshot().selectedIds);
   const historyCount = () => page.evaluate(() => window.changes.length);
+  // Opening or closing the inspector refits the viewport on a later
+  // ResizeObserver tick (later in WebKit than in Chromium); map coordinates
+  // only once the artboard has stopped moving.
+  const artboard = async () => {
+    let box = await page.locator('.rie-artboard').boundingBox();
+    for (let i = 0; i < 30; i++) {
+      await page.evaluate(
+        () =>
+          new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve))
+          )
+      );
+      const next = await page.locator('.rie-artboard').boundingBox();
+      if (JSON.stringify(next) === JSON.stringify(box)) break;
+      box = next;
+    }
+    return box;
+  };
   const world = async (x, y) => {
-    const b = await page.locator('.rie-artboard').boundingBox(),
+    const b = await artboard(),
       d = await doc();
     return {
       x: b.x + (x * b.width) / d.width,
       y: b.y + (y * b.height) / d.height,
     };
+  };
+  // Drag deltas are exact on Chromium. Engines that report whole-pixel pointer
+  // coordinates (pointerQuantum) can land up to one CSS pixel off.
+  const dragTolerance = async () => {
+    const b = await page.locator('.rie-artboard').boundingBox(),
+      d = await doc();
+    return Math.max(0.02, (pointerQuantum * d.width) / b.width);
   };
   const click = async (x, y) => {
     const p = await world(x, y);
@@ -144,8 +166,16 @@ try {
   await page.getByRole('application').focus();
   await drag(first, { x: first.x - 35, y: first.y + 25 });
   let changed = (await doc()).layers[0];
-  near(point(changed, changed.points[0]).x, first.x - 35);
-  near(point(changed, changed.points[0]).y, first.y + 25);
+  near(
+    point(changed, changed.points[0]).x,
+    first.x - 35,
+    await dragTolerance()
+  );
+  near(
+    point(changed, changed.points[0]).y,
+    first.y + 25,
+    await dragTolerance()
+  );
   near(point(changed, changed.points[1]).x, second.x);
   near(point(changed, changed.points[1]).y, second.y);
   await undo();
@@ -171,7 +201,8 @@ try {
   await page.keyboard.up('Shift');
   let open = (await doc()).layers.at(-1),
     last = point(open, open.points.at(-1));
-  near(last.y, 70);
+  // Shift snaps to the first point, which was placed by a pointer click.
+  near(last.y, 70, await dragTolerance());
   await click(last.x, last.y);
   open = (await doc()).layers.at(-1);
   assert.equal(open.pathClosed, false);
@@ -243,8 +274,16 @@ try {
   await page.keyboard.up('Alt');
   changed = await doc();
   for (let i = 0; i < 2; i++) {
-    near(changed.layers[i].matrix[4], original.layers[i].matrix[4] + 25);
-    near(changed.layers[i].matrix[5], original.layers[i].matrix[5] + 15);
+    near(
+      changed.layers[i].matrix[4],
+      original.layers[i].matrix[4] + 25,
+      await dragTolerance()
+    );
+    near(
+      changed.layers[i].matrix[5],
+      original.layers[i].matrix[5] + 15,
+      await dragTolerance()
+    );
     assert.deepEqual(
       changed.layers[i].matrix.slice(0, 4),
       original.layers[i].matrix.slice(0, 4)
@@ -280,8 +319,8 @@ try {
   const resized = bounds((await doc()).layers.slice(0, 2));
   near(resized.x, group.x);
   near(resized.y, group.y);
-  near(resized.right, group.right + 70);
-  near(resized.bottom, group.bottom + 35);
+  near(resized.right, group.right + 70, await dragTolerance());
+  near(resized.bottom, group.bottom + 35, await dragTolerance());
   await undo();
   assert.deepEqual((await doc()).layers, original.layers);
   const top = await world((group.x + group.right) / 2, group.y),
@@ -359,7 +398,7 @@ try {
   // Touch creates and edits the same vertices, with cancellation restoring the whole gesture.
   await reset();
   await choosePath();
-  const cdp = await page.context().newCDPSession(page);
+  const touchInput = await createTouch(page);
   // Chromium aligns touch pointermove with animation frames, so a CDP touch
   // can resolve before its pointer event is handled. Wait a bounded number of
   // frames for the expected state; the assertion that follows still decides.
@@ -368,10 +407,10 @@ try {
       await page.evaluate(() => new Promise(requestAnimationFrame));
   };
   const touch = (type, points) =>
-    cdp.send('Input.dispatchTouchEvent', {
+    touchInput.send(
       type,
-      touchPoints: points.map((p, id) => ({ ...p, id })),
-    });
+      points.map((p, id) => ({ ...p, id }))
+    );
   const tap = async (x, y) => {
     await touch('touchStart', [await world(x, y)]);
     await touch('touchEnd', []);
@@ -408,7 +447,7 @@ try {
   ]);
   await touch('touchEnd', []);
   assert.deepEqual((await doc()).layers[0], touchPolygon);
-  await cdp.detach();
+  await touchInput.detach();
   assert.equal(
     await page.evaluate(() => document.documentElement.scrollWidth <= 390),
     true
