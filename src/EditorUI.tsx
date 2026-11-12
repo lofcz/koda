@@ -45,7 +45,7 @@ import {
   transformImage,
 } from './crop';
 import type { CropOptions, CropPreset } from './crop';
-import { CropStraighten } from './CropStraighten';
+import { CropStraighten, rangeFill } from './CropStraighten';
 import {
   formatRichText,
   selectedTextStyle,
@@ -293,6 +293,7 @@ function SliderField({
         max={max}
         step={step}
         value={value}
+        style={rangeFill(min, max, value)}
         disabled={disabled}
         data-testid={testId}
         onPointerDown={onStart}
@@ -2602,7 +2603,11 @@ export function EditorUI({
   if (tool === 'draw')
     controls = (
       <>
-        <div className="rie-row">
+        <div
+          className="rie-segmented rie-draw-modes"
+          role="group"
+          aria-label={t('tools.draw')}
+        >
           {(['brush', 'highlighter', 'eraser'] as const).map((mode) => (
             <button
               type="button"
@@ -2729,7 +2734,7 @@ export function EditorUI({
                   data-testid="native-text-add"
                   onClick={addText}
                 >
-                  <Icon name="text" />
+                  <Icon name="text_add" />
                 </button>
               </div>
             </div>
