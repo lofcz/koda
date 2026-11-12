@@ -40,9 +40,11 @@ import {
   constrainCropRect,
   constrainImageToCrop,
   parseCropOptions,
+  straightenAngle,
   transformImage,
 } from './crop';
 import type { CropOptions, CropPreset } from './crop';
+import { CropStraighten } from './CropStraighten';
 import {
   formatRichText,
   selectedTextStyle,
@@ -468,8 +470,13 @@ export function EditorUI({
       handle: RichTextInputHandle;
     } | null>(null),
     uploadField = useRef<HTMLInputElement>(null),
-    straightening = useRef<ImageDocument | null>(null),
-    straightenStartAngle = useRef(0);
+    // Consecutive straighten edits compose from one base until another edit replaces the preview.
+    straightening = useRef<{
+      base: ImageDocument;
+      angle: number;
+      result: ImageDocument | null;
+    } | null>(null),
+    cropCircleHint = useId();
   const [tool, setTool] = useState<EditorTool>('select'),
     [panel, setPanel] = useState(false),
     [locked, setLocked] = useState(true);
@@ -572,6 +579,7 @@ export function EditorUI({
   const cropRect = useRef(crop);
   const cropSession = useRef<{
     imageRevision: number;
+    angle: number;
     output?: { width: number; height: number };
   } | null>(null);
   const [cropOverrides, setCropOverrides] = useState<Partial<CropOptions>>({});
@@ -657,7 +665,6 @@ export function EditorUI({
       if (!cropSession.current) return;
       cropSession.current = null;
       straightening.current = null;
-      setAngle(0);
       setTool('select');
       setPanel(false);
     };
@@ -860,7 +867,6 @@ export function EditorUI({
         },
       });
     engine.commit(next);
-    setAngle(0);
     setTool('select');
     setPanel(false);
     return next;
@@ -916,8 +922,14 @@ export function EditorUI({
       }
       surface.current?.finishText();
       engine.begin();
+      const startAngle = straightenAngle(
+        nextDocument.imageMatrix,
+        options.rotationRange,
+        angle
+      );
       cropSession.current = {
         imageRevision: engine.getSnapshot().imageRevision,
+        angle: startAngle,
       };
       if (nextDocument !== current) engine.preview(nextDocument);
       setCropOverrides({});
@@ -925,7 +937,7 @@ export function EditorUI({
       setCrop(nextCrop);
       setRatio(nextRatio);
       setCropPreset(nextRatio ? 'custom' : 'free');
-      setAngle(0);
+      setAngle(startAngle);
     }
     setTool(next);
     setPanel(next !== 'select');
@@ -1163,8 +1175,21 @@ export function EditorUI({
     )
       return;
     setCropPreset(preset.id);
+    presetOverlays(preset);
     if (cropSession.current) cropSession.current.output = preset.size;
     setCropOutput(preset.size);
+  };
+  /** A preset's overlay and print guides replace the previous preset's; otherwise the host options apply. */
+  const presetOverlays = (preset?: CropPreset) => {
+    const previous = cropOptions.presets?.find(
+        (item) => item.id === cropPreset
+      ),
+      next = { ...cropOverrides };
+    if (preset?.overlay !== undefined) next.overlay = preset.overlay;
+    else if (previous?.overlay !== undefined) delete next.overlay;
+    if (preset?.bleed !== undefined) next.bleed = preset.bleed;
+    else if (previous?.bleed !== undefined) delete next.bleed;
+    setCropOverrides(next);
   };
   const previewCropImage = (base: ImageDocument, delta: Matrix) => {
     let next = transformImage(base, delta);
@@ -1182,6 +1207,33 @@ export function EditorUI({
       x = rect.x + rect.width / 2,
       y = rect.y + rect.height / 2;
     return multiply(translate(x, y), multiply(matrix, translate(-x, -y)));
+  };
+  /** Read the straighten angle back from the previewed image after a quarter turn or flip. */
+  const syncAngle = (hint: number) => {
+    const current = engine.getSnapshot().document;
+    if (current)
+      setAngle(
+        straightenAngle(current.imageMatrix, cropOptions.rotationRange, hint)
+      );
+  };
+  const straighten = (value: number) => {
+    const current = engine.getSnapshot().document;
+    if (!current || !cropSession.current || !Number.isFinite(value)) return;
+    const range = cropOptions.rotationRange,
+      next = Math.max(-range, Math.min(range, value)),
+      session =
+        straightening.current?.result === current
+          ? straightening.current
+          : { base: current, angle, result: null };
+    previewCropImage(
+      session.base,
+      centeredCropTransform(rotation(next - session.angle))
+    );
+    straightening.current = {
+      ...session,
+      result: engine.getSnapshot().document,
+    };
+    setAngle(next);
   };
   const rotate = (clockwise: boolean) => {
     const current = engine.getSnapshot().document;
@@ -1224,7 +1276,7 @@ export function EditorUI({
       }
     }
     straightening.current = null;
-    setAngle(0);
+    syncAngle(angle);
   };
   const flip = (horizontal: boolean) => {
     const current = engine.getSnapshot().document;
@@ -1244,7 +1296,7 @@ export function EditorUI({
       });
     }
     straightening.current = null;
-    setAngle(0);
+    syncAngle(-angle);
   };
   const reorder = (direction: number) => {
     if (!doc || !layer) return;
@@ -1294,17 +1346,13 @@ export function EditorUI({
   const cancelCrop = () => {
     if (cropSession.current) {
       surface.current?.finishCropGesture();
+      setAngle(cropSession.current.angle);
       cropSession.current = null;
       engine.cancel();
     }
     straightening.current = null;
-    setAngle(0);
     setTool('select');
     setPanel(false);
-  };
-  const endStraighten = () => {
-    if (!straightening.current) return;
-    straightening.current = null;
   };
   const save = async () => {
     if (disabled) return;
@@ -1863,7 +1911,7 @@ export function EditorUI({
               type="button"
               className="rie-icon-button"
               aria-label={t('crop.center_image')}
-              title={t('crop.center_image')}
+              title={t('crop.center_image_hint')}
               data-testid="native-crop-center"
               onClick={() => surface.current?.cropRecenter()}
             >
@@ -1874,11 +1922,12 @@ export function EditorUI({
           <button
             type="button"
             data-testid="native-crop-center"
-            onClick={() =>
+            title={t(
               cropOptions.interactionFocus === 'image'
-                ? surface.current?.cropRecenter()
-                : surface.current?.fitCrop()
-            }
+                ? 'crop.center_image_hint'
+                : 'crop.center_selection_hint'
+            )}
+            onClick={() => surface.current?.cropRecenter()}
           >
             <Icon name="fit_to_screen" />
             {t(
@@ -1915,6 +1964,7 @@ export function EditorUI({
               const preset = presets.find((item) => item.id === id);
               if (preset) selectCropPreset(preset);
               else {
+                presetOverlays();
                 setRatio(null);
                 setCropPreset('custom');
                 if (cropSession.current) cropSession.current.output = undefined;
@@ -2007,39 +2057,28 @@ export function EditorUI({
               .replace('{height}', String(output.height))}
           </p>
         ) : null}
+        {cropOptions.bleed &&
+        (cropOptions.bleed.bleed > 0 || cropOptions.bleed.safe > 0) ? (
+          <p className="rie-help" data-testid="native-crop-bleed-hint">
+            {[
+              cropOptions.bleed.bleed > 0 ? t('crop.bleed_hint') : '',
+              cropOptions.bleed.safe > 0 ? t('crop.safe_hint') : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          </p>
+        ) : null}
         {cropOptions.enableRotation ? (
           <>
-            <SliderField
+            <CropStraighten
               label={t('crop.straighten')}
+              inputLabel={t('crop.straighten_angle')}
+              resetLabel={t('crop.straighten_reset')}
               value={angle}
-              min={-cropOptions.rotationRange}
-              max={cropOptions.rotationRange}
-              step={0.5}
-              suffix="°"
+              range={cropOptions.rotationRange}
+              locale={state.options.locale}
               testId="native-crop-straighten"
-              onStart={() => {
-                if (!straightening.current) {
-                  straightening.current = engine.getSnapshot().document;
-                  straightenStartAngle.current = angle;
-                }
-              }}
-              onChange={(value) => {
-                const base =
-                  straightening.current ?? engine.getSnapshot().document;
-                if (!base) return;
-                if (!straightening.current) {
-                  straightening.current = base;
-                  straightenStartAngle.current = angle;
-                }
-                previewCropImage(
-                  base,
-                  centeredCropTransform(
-                    rotation(value - straightenStartAngle.current)
-                  )
-                );
-                setAngle(value);
-              }}
-              onEnd={endStraighten}
+              onChange={straighten}
             />
             <div className="rie-row" aria-label={t('crop.rotate_flip')}>
               <button
@@ -2191,6 +2230,28 @@ export function EditorUI({
                 })
               }
             />
+            <label className="rie-check">
+              <input
+                type="checkbox"
+                data-testid="native-crop-overlay-circle"
+                aria-describedby={
+                  cropOptions.overlay === 'circle' ? cropCircleHint : undefined
+                }
+                checked={cropOptions.overlay === 'circle'}
+                onChange={(event) =>
+                  setCropOverrides({
+                    ...cropOverrides,
+                    overlay: event.target.checked ? 'circle' : 'none',
+                  })
+                }
+              />
+              {t('crop.overlay_circle')}
+            </label>
+            {cropOptions.overlay === 'circle' ? (
+              <p className="rie-help" id={cropCircleHint}>
+                {t('crop.overlay_circle_hint')}
+              </p>
+            ) : null}
           </div>
         </details>
         <p className="rie-help">
@@ -3361,6 +3422,7 @@ export function EditorUI({
             crop={crop}
             cropRatio={ratio}
             cropOptions={cropOptions}
+            cropOutput={cropOutput}
             onCrop={setCrop}
             onText={editText}
             renderTextInput={renderTextInput}

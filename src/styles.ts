@@ -142,7 +142,13 @@ export const styles = `
 .image-editor-root .rie-crop-details>summary{cursor:pointer;font-size:12px;color:var(--rie-fg);padding:5px 0}
 .image-editor-root .rie-crop-details>.rie-stack{padding-top:10px}
 .image-editor-root .rie-check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--rie-fg);min-height:32px;cursor:pointer}
-.image-editor-root .rie-check input{width:16px;height:16px;flex:none;accent-color:var(--rie-accent)}
+.image-editor-root .rie-check input[type="checkbox"]{width:16px;height:16px;padding:0;margin:0;flex:none;accent-color:var(--rie-accent)}
+.image-editor-root .rie-crop-straighten>span{align-items:center}
+.image-editor-root .rie-crop-angle{display:flex;align-items:center;gap:5px;color:var(--rie-fg);font-size:12px}
+.image-editor-root .rie-crop-straighten .rie-crop-angle input[type="text"]{width:58px;height:28px;padding:3px 6px;text-align:right;font-variant-numeric:tabular-nums}
+.image-editor-root .rie-crop-angle .rie-icon-button{width:28px;height:28px;min-height:28px;padding:5px;margin-left:2px}
+.image-editor-root .rie-crop-angle .rie-icon-button[data-idle]{opacity:.45}
+@media(pointer:coarse){.image-editor-root .rie-crop-straighten .rie-crop-angle input[type="text"]{height:36px}.image-editor-root .rie-crop-angle .rie-icon-button{width:36px;height:36px;min-height:36px}}
 .image-editor-root .rie-picker-group{font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.04em;color:var(--rie-secondary);padding:8px 9px 4px}
 .image-editor-root .rie-ratios{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
 .image-editor-root .rie-ratios button{min-width:0;min-height:62px;flex-direction:column;padding:7px 2px;gap:6px;font-size:10px;overflow-wrap:anywhere}

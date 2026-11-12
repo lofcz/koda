@@ -21,7 +21,25 @@ export type CropPreset = {
   aspectRatio?: number | null;
   /** Output size, applied with its matching aspect ratio when the crop is committed. */
   size?: CropSize;
+  /** Viewport-only overlay to show while this preset is active; the host option applies when omitted. */
+  overlay?: CropOverlay;
+  /** Print guides to show while this preset is active; `null` hides host guides. */
+  bleed?: CropBleed | null;
 };
+/** Viewport-only crop overlay. `circle` dims everything outside the ellipse inscribed in the crop. */
+export type CropOverlay = 'none' | 'circle';
+/**
+ * Print guides drawn inside the crop, never exported. The crop is the full printed sheet:
+ * `bleed` is the inset from the crop edge to the trim line, `safe` the further inset from the
+ * trim line to the safe area. `px` values are output pixels; `fraction` values are fractions
+ * of the shorter output side.
+ */
+export type CropBleed = {
+  bleed?: number;
+  safe?: number;
+  unit?: 'px' | 'fraction';
+};
+export type ResolvedCropBleed = Required<CropBleed>;
 export type CropGuides =
   | 'none'
   | 'thirds'
@@ -50,9 +68,15 @@ export type CropOptions = {
   enableRotation?: boolean;
   /** Positive and negative straightening limits in degrees. */
   rotationRange?: number;
+  /** Viewport-only profile overlay; never part of exported pixels. */
+  overlay?: CropOverlay;
+  /** Viewport-only print bleed and safe-area guides; never part of exported pixels. */
+  bleed?: CropBleed | null;
 };
-export type ResolvedCropOptions = Required<Omit<CropOptions, 'presets'>> &
-  Pick<CropOptions, 'presets'>;
+export type ResolvedCropOptions = Required<
+  Omit<CropOptions, 'presets' | 'bleed'>
+> &
+  Pick<CropOptions, 'presets'> & { bleed: ResolvedCropBleed | null };
 export type CropIntent = {
   aspectRatio?: number | null;
   axis?: 'width' | 'height';
@@ -112,6 +136,20 @@ const size = (value: unknown, fallback: CropSize): CropSize => {
     height: numeric(input.height, 1, MAX_DIMENSION),
   };
 };
+const overlay = (value: unknown, fallback: CropOverlay) =>
+  choice(value, ['none', 'circle'] as const, fallback);
+/** Validate print guides; `undefined` and `null` both mean no guides. */
+export function parseCropBleed(value: unknown): ResolvedCropBleed | null {
+  if (value == null) return null;
+  const input = object(value),
+    unit = choice(input.unit, ['px', 'fraction'] as const, 'px'),
+    limit = unit === 'px' ? MAX_DIMENSION / 2 : 0.5,
+    bleed = numeric(input.bleed, 0, limit, 0),
+    safe = numeric(input.safe, 0, limit, 0);
+  if (unit === 'fraction' && bleed + safe >= 0.5)
+    throw new CropConstraintError('Invalid crop bleed');
+  return { bleed, safe, unit };
+}
 const label = (value: unknown): string => {
   if (typeof value !== 'string' || !value.trim() || value.length > 512)
     throw new CropConstraintError('Invalid crop preset label');
@@ -193,6 +231,10 @@ export function parseCropOptions(value: unknown = {}): ResolvedCropOptions {
         )
           throw new CropConstraintError('Crop preset size and ratio disagree');
       } else result.aspectRatio = ratio(preset.aspectRatio);
+      if (preset.overlay !== undefined)
+        result.overlay = overlay(preset.overlay, 'none');
+      if (preset.bleed !== undefined)
+        result.bleed = parseCropBleed(preset.bleed);
       return result;
     });
   }
@@ -219,7 +261,73 @@ export function parseCropOptions(value: unknown = {}): ResolvedCropOptions {
     enableZoom: flag(input.enableZoom, true),
     enableRotation: flag(input.enableRotation, true),
     rotationRange: numeric(input.rotationRange, 0, 180, 45),
+    overlay: overlay(input.overlay, 'none'),
+    bleed: parseCropBleed(input.bleed),
   };
+}
+
+/**
+ * Straightening angle of an affine source in degrees: the tilt of its x axis with quarter turns
+ * removed. Flips need no special case because a reflection keeps the axis line. Among the
+ * equivalent angles within `range`, the one closest to `hint` wins, so a host range above 45°
+ * keeps showing the angle the user chose.
+ */
+export function straightenAngle(matrix: Matrix, range = 45, hint = 0): number {
+  validSource({ width: 1, height: 1, matrix });
+  const tilt = (Math.atan2(matrix[1], matrix[0]) * 180) / Math.PI,
+    nearest = tilt - 90 * Math.round((tilt - hint) / 90),
+    candidates = [nearest - 90, nearest, nearest + 90].filter(
+      (angle) => Math.abs(angle) <= range + 1e-6
+    );
+  const angle = candidates.length
+    ? candidates.reduce((best, angle) =>
+        Math.abs(angle - hint) < Math.abs(best - hint) ? angle : best
+      )
+    : tilt - 90 * Math.round(tilt / 90);
+  const rounded = Math.round(angle * 1e6) / 1e6;
+  return Math.abs(rounded) > range ? Math.sign(rounded) * range : rounded || 0;
+}
+
+/** Bleed and safe-area insets in crop units, one per axis, clamped inside the crop. */
+export function cropBleedInsets(
+  crop: CropSize,
+  output: CropSize,
+  bleed: ResolvedCropBleed
+): { bleed: Point; safe: Point } {
+  const shorter = Math.min(output.width, output.height),
+    toCrop = (value: number): Point => {
+      const px = bleed.unit === 'fraction' ? value * shorter : value;
+      return {
+        x: Math.min(crop.width / 2, (px * crop.width) / output.width),
+        y: Math.min(crop.height / 2, (px * crop.height) / output.height),
+      };
+    };
+  return { bleed: toCrop(bleed.bleed), safe: toCrop(bleed.bleed + bleed.safe) };
+}
+
+/** Move a crop so its center matches the transformed source center, keeping its size when possible. */
+export function centerCropOnSource(
+  rect: Rect,
+  source: CropSource,
+  settings: CropOptions = {},
+  intent: CropIntent = {}
+): Rect {
+  validRect(rect);
+  validSource(source);
+  const center = transform(source.matrix, {
+    x: source.width / 2,
+    y: source.height / 2,
+  });
+  return constrainCropRect(
+    {
+      ...rect,
+      x: center.x - rect.width / 2,
+      y: center.y - rect.height / 2,
+    },
+    source,
+    settings,
+    { aspectRatio: intent.aspectRatio }
+  );
 }
 
 function validSource(source: CropSource) {

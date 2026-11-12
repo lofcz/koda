@@ -61,13 +61,16 @@ import {
   zoomAt,
 } from './render';
 import {
+  centerCropOnSource,
   constrainCropRect,
   constrainImageToCrop,
   cropOutputSize,
   CropConstraintError,
   transformImage,
   type CropOptions,
+  type CropSize,
 } from './crop';
+import { clipCropGuides, paintCropMask, paintCropOverlay } from './cropOverlay';
 import { resolveTextStyle, textContent } from './textModel';
 import {
   RichTextInput,
@@ -116,6 +119,8 @@ type Props = {
   crop: Rect;
   cropRatio: number | null;
   cropOptions?: CropOptions;
+  /** Staged preset output size; print guides measure output pixels against it. */
+  cropOutput?: CropSize;
   compare?: boolean;
   snap?: boolean;
   shape?: ShapeKind | 'path' | null;
@@ -222,6 +227,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       crop,
       cropRatio,
       cropOptions = DEFAULT_CROP_OPTIONS,
+      cropOutput,
       compare = false,
       snap = true,
       shape,
@@ -680,7 +686,45 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         finishPath,
         deletePathPoint,
         cropZoom: zoomCrop,
-        cropRecenter: recenterCrop,
+        cropRecenter: () => {
+          const state = cropState.current;
+          if (state.options.interactionFocus === 'image') return recenterCrop();
+          const current = engine.getSnapshot().document,
+            source = engine.image;
+          if (!current || !source || state.tool !== 'crop') return;
+          let rect: Rect;
+          try {
+            rect = centerCropOnSource(
+              state.crop,
+              { ...source, matrix: current.imageMatrix },
+              state.options,
+              { aspectRatio: state.options.aspectRatio ?? cropRatio }
+            );
+          } catch (error) {
+            if (!(error instanceof CropConstraintError)) throw error;
+            return;
+          }
+          onCrop(rect);
+          // Pan only when the moved crop leaves the viewport; zoom out only if it cannot fit.
+          const view = viewRef.current,
+            a = screen(rect, view),
+            w = rect.width * view.zoom,
+            h = rect.height * view.zoom;
+          if (
+            a.x >= 0 &&
+            a.y >= 0 &&
+            a.x + w <= size.width &&
+            a.y + h <= size.height
+          )
+            return;
+          const fitted = fitView(rect, size.width, size.height),
+            zoom = Math.min(view.zoom, fitted.zoom);
+          updateView({
+            zoom,
+            x: size.width / 2 - (rect.x + rect.width / 2) * zoom,
+            y: size.height / 2 - (rect.y + rect.height / 2) * zoom,
+          });
+        },
         fitCrop: () => {
           const rect = cropState.current.crop;
           const fitted = fitView(rect, size.width, size.height);
@@ -723,6 +767,9 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         recenterCrop,
         size,
         updateView,
+        engine,
+        cropRatio,
+        onCrop,
       ]
     );
     useEffect(() => () => engine.cancel(), [engine]);
@@ -893,11 +940,9 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         const a = screen(crop, view),
           w = crop.width * view.zoom,
           h = crop.height * view.zoom;
-        ui.fillStyle = `rgba(5,12,20,${cropOptions.maskOpacity ?? 0.75})`;
-        ui.beginPath();
-        ui.rect(0, 0, size.width, size.height);
-        ui.rect(a.x, a.y, w, h);
-        ui.fill('evenodd');
+        const area = { x: a.x, y: a.y, width: w, height: h };
+        paintCropMask(ui, size, area, cropOptions);
+        clipCropGuides(ui, area, cropOptions);
         ui.strokeStyle = 'rgba(255,255,255,.48)';
         ui.lineWidth = 1;
         const guides = cropOptions.guides ?? 'thirds';
@@ -942,9 +987,11 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           );
           ui.stroke();
         }
+        ui.restore();
         ui.strokeStyle = '#fff';
         ui.lineWidth = 1.5;
         ui.strokeRect(a.x, a.y, w, h);
+        paintCropOverlay(ui, area, crop, cropOptions, cropOutput);
         for (const { handle: name, point } of cropOptions.handleStyle ===
         'invisible'
           ? []
@@ -1157,6 +1204,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       tool,
       crop,
       cropOptions,
+      cropOutput,
       guides,
       compare,
       editing,

@@ -13,6 +13,9 @@ export {
   sourceContainsRect,
   cropOutputSize,
   CropConstraintError,
+  straightenAngle,
+  centerCropOnSource,
+  cropBleedInsets,
 } from './crop';
 export { RichTextInput } from './RichTextInput';
 export type {
