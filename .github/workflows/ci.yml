@@ -5,83 +5,34 @@ on:
     branches: [main]
   pull_request:
 
+# Supported: Node 24 (engines allow 22+) and React 19.
 jobs:
-  checks:
-    name: Lint, typecheck & build
+  ci:
+    name: Node 24, React 19
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # Installs the pnpm version pinned by `packageManager` in package.json.
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
+      # The demo is a workspace package, so the root install covers it.
       - run: pnpm install --frozen-lockfile
       - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm run build
       - run: pnpm run test:coverage
+      - run: pnpm run test:package
+      - run: pnpm --dir demo run typecheck
+      - run: pnpm --dir demo run build
       - uses: codecov/codecov-action@v5
         with:
           files: coverage/lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
-
-  demo:
-    name: Demo typecheck & build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      # The demo is a workspace package, so the root install covers it and the
-      # ../src it aliases.
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --dir demo run typecheck
-      - run: pnpm --dir demo run build
-
-  browser:
-    name: Local canvas pixels and interactions
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # Hosted runners include Chromium's shared libraries. Avoid an apt refresh
-      # for optional fonts: Ubuntu mirror outages must not block canvas checks.
+      # Hosted runners include Chromium's shared libraries.
       - run: pnpm exec playwright install --only-shell chromium
       - run: pnpm run test:browser
-
-  test:
-    name: Test (Node ${{ matrix.node }}, React ${{ matrix.react }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [20, 22, 24]
-        react: [18, 19]
-    steps:
-      - uses: actions/checkout@v4
-      # pnpm 11 needs Node 22.13+. The standalone build bundles its own Node,
-      # so it also runs on the Node 20 entries while the tests themselves run
-      # on the matrix Node.
-      - uses: pnpm/action-setup@v6
-        with:
-          standalone: true
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # Swaps React in this job's checkout only; nothing is committed.
-      - run: pnpm add --save-dev --workspace-root react@${{ matrix.react }} react-dom@${{ matrix.react }}
-      - run: pnpm test

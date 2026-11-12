@@ -6,7 +6,7 @@ Version 2 replaces the hosted engine used in version 1. See [migration notes](#m
 
 ## Install and use
 
-Requires React 18 or newer and a browser with Canvas2D and Pointer Events. Install the stable npm package:
+Requires React 19 and Node 22 or newer (CI runs Node 24) and a browser with Canvas2D and Pointer Events. Install the stable npm package:
 
 ```sh
 npm install @lofcz/react-image-editor

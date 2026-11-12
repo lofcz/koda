@@ -34,7 +34,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "devEngines": {
     "packageManager": {
@@ -69,7 +69,7 @@
     "bootstrap:publish": "node scripts/bootstrap-publish.mjs"
   },
   "peerDependencies": {
-    "react": ">=18"
+    "react": ">=19"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",
