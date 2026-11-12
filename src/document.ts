@@ -42,6 +42,7 @@ export {
   validSlice,
 } from './frames';
 export { applyFrame } from './model';
+export {
   LAYER_RIGHTS,
   parseLayerRights,
   parseLayerRightsDefaults,
