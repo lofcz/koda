@@ -1,6 +1,17 @@
 import { normalizeTextRuns } from './textModel';
 import type { TextRun } from './textModel';
+import { parseBackgroundImage } from './backgrounds';
+import type { BackgroundImage } from './backgrounds';
+import {
+  flipMargins,
+  parseFrameImage,
+  rotateMargins,
+  setFrame,
+} from './frames';
+import type { FrameImage, SliceInsets } from './frames';
 export type { TextRun, TextStyle, ResolvedTextStyle } from './textModel';
+export type { BackgroundImage, BackgroundFit } from './backgrounds';
+export type { FrameImage, FrameRepeat, SliceInsets } from './frames';
 
 /** The editable document uses image pixels, never CSS pixels or canvas DPR. */
 export type Point = { x: number; y: number };
@@ -97,10 +108,21 @@ export type Frame = {
     | 'bevel'
     | 'hooks'
     | 'cross'
-    | 'edge';
+    | 'edge'
+    | 'image';
   color: string;
-  /** Width in document pixels, drawn inside the image. */
+  /** Width in document pixels. Image frames: thickness of the widest slice side. */
   width: number;
+  /** `outside` grows the canvas by the frame so it never covers the photo. Default `inside`. */
+  placement?: 'inside' | 'outside';
+  /** Required when style is `image`; embedded so documents restore without the host catalog. */
+  image?: FrameImage;
+  /**
+   * Outside placement only: canvas pixels the frame added per side, kept in
+   * document orientation through quarter turns, flips and resizes so the
+   * frame paints over them and removing it restores the photo exactly.
+   */
+  margins?: SliceInsets;
 };
 export type ImageDocument = {
   width: number;
@@ -109,6 +131,8 @@ export type ImageDocument = {
   layers: readonly Layer[];
   effects: Effects;
   background: string;
+  /** Painted over `background` and under the photo. Absent means none. */
+  backgroundImage?: BackgroundImage;
   frame: Frame;
   cornerRadius: number;
 };
@@ -225,11 +249,41 @@ export function resizeDocument(
     size.height
   );
   const factor = Math.min(size.width / doc.width, size.height / doc.height);
+  const sx = size.width / doc.width,
+    sy = size.height / doc.height,
+    margins = doc.frame.margins;
   return {
     ...resized,
-    frame: { ...doc.frame, width: doc.frame.width * factor },
+    frame: {
+      ...doc.frame,
+      width: doc.frame.width * factor,
+      ...(margins
+        ? {
+            margins: {
+              top: margins.top * sy,
+              right: margins.right * sx,
+              bottom: margins.bottom * sy,
+              left: margins.left * sx,
+            },
+          }
+        : {}),
+    },
     cornerRadius: doc.cornerRadius * factor,
+    ...(doc.backgroundImage
+      ? {
+          backgroundImage: {
+            ...doc.backgroundImage,
+            scale: clamp(doc.backgroundImage.scale * factor, 0.01, 100),
+          },
+        }
+      : {}),
   };
+}
+/** Replace the frame; an `outside` frame grows the canvas around the photo and shrinks it again on removal. */
+export function applyFrame(doc: ImageDocument, frame: Frame): ImageDocument {
+  return setFrame(doc, frame, (current, dx, dy, width, height) =>
+    transformDocument(current, translate(dx, dy), width, height)
+  );
 }
 export function cropDocument(doc: ImageDocument, rect: Rect): ImageDocument {
   const x = clamp(Math.round(rect.x), 0, doc.width - 1),
@@ -240,24 +294,39 @@ export function cropDocument(doc: ImageDocument, rect: Rect): ImageDocument {
     return doc;
   return transformDocument(doc, translate(-x, -y), width, height);
 }
+/** Outside-frame margins follow the document's own quarter turns and flips. */
+function withMargins(
+  doc: ImageDocument,
+  map: (margins: SliceInsets) => SliceInsets
+): ImageDocument {
+  return doc.frame.margins
+    ? { ...doc, frame: { ...doc.frame, margins: map(doc.frame.margins) } }
+    : doc;
+}
 export function rotateDocument(
   doc: ImageDocument,
   clockwise: boolean
 ): ImageDocument {
-  return transformDocument(
-    doc,
-    clockwise ? [0, 1, -1, 0, doc.height, 0] : [0, -1, 1, 0, 0, doc.width],
-    doc.height,
-    doc.width
+  return withMargins(
+    transformDocument(
+      doc,
+      clockwise ? [0, 1, -1, 0, doc.height, 0] : [0, -1, 1, 0, 0, doc.width],
+      doc.height,
+      doc.width
+    ),
+    (margins) => rotateMargins(margins, clockwise)
   );
 }
 export function flipDocument(
   doc: ImageDocument,
   horizontal: boolean
 ): ImageDocument {
-  return transformDocument(
-    doc,
-    horizontal ? [-1, 0, 0, 1, doc.width, 0] : [1, 0, 0, -1, 0, doc.height]
+  return withMargins(
+    transformDocument(
+      doc,
+      horizontal ? [-1, 0, 0, 1, doc.width, 0] : [1, 0, 0, -1, 0, doc.height]
+    ),
+    (margins) => flipMargins(margins, horizontal)
   );
 }
 /** Rotate the entire editable composition around its center, retaining every layer. */
@@ -629,6 +698,8 @@ export function parseDocument(input: unknown): ImageDocument {
   );
   result.imageMatrix = matrix(doc.imageMatrix);
   result.background = string(doc.background, 'transparent', 256);
+  if (doc.backgroundImage !== undefined)
+    result.backgroundImage = parseBackgroundImage(doc.backgroundImage);
   result.cornerRadius = number(doc.cornerRadius, 0, MAX_DIMENSION, 0);
   const effect = doc.effects === undefined ? {} : object(doc.effects);
   result.effects = {
@@ -682,12 +753,32 @@ export function parseDocument(input: unknown): ImageDocument {
         'hooks',
         'cross',
         'edge',
+        'image',
       ],
       'none'
     ),
     color: string(frame.color, DEFAULT_FRAME.color, 256),
     width: number(frame.width, 0, MAX_DIMENSION, DEFAULT_FRAME.width),
   };
+  if (frame.placement !== undefined)
+    result.frame.placement = choice(
+      frame.placement,
+      ['inside', 'outside'],
+      'inside'
+    );
+  if (frame.image !== undefined)
+    result.frame.image = parseFrameImage(frame.image);
+  else if (result.frame.style === 'image')
+    throw new Error('Invalid frame image');
+  if (frame.margins !== undefined) {
+    const margins = object(frame.margins);
+    result.frame.margins = {
+      top: number(margins.top, 0, MAX_DIMENSION),
+      right: number(margins.right, 0, MAX_DIMENSION),
+      bottom: number(margins.bottom, 0, MAX_DIMENSION),
+      left: number(margins.left, 0, MAX_DIMENSION),
+    };
+  }
   if (!Array.isArray(doc.layers) || doc.layers.length > 10000)
     throw new Error('Invalid document layers');
   const ids = new Set<string>();
@@ -865,7 +956,7 @@ export class DocumentHistory {
   past: ImageDocument[] = [];
   future: ImageDocument[] = [];
   private transaction: ImageDocument | null = null;
-  readonly baseline: ImageDocument;
+  baseline: ImageDocument;
   constructor(
     public current: ImageDocument,
     private limit = 100
@@ -882,6 +973,11 @@ export class DocumentHistory {
     if (!this.transaction) this.transaction = this.current;
   }
   preview(next: ImageDocument) {
+    this.current = next;
+  }
+  /** Swap in derived data (text re-measured after a font loads) without a history entry. */
+  replace(next: ImageDocument) {
+    if (this.current === this.baseline) this.baseline = next;
     this.current = next;
   }
   commit(next = this.current) {

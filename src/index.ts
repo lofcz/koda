@@ -18,6 +18,7 @@ export {
   cropBleedInsets,
 } from './crop';
 export { RichTextInput } from './RichTextInput';
+export { DEFAULT_FONTS } from './fonts';
 export type {
   RichTextInputProps,
   RichTextInputHandle,

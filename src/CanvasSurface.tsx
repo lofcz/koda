@@ -864,6 +864,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             layers: [],
             effects: DEFAULT_EFFECTS,
             background: 'transparent',
+            backgroundImage: undefined,
             frame: { ...doc.frame, style: 'none' as const },
             cornerRadius: 0,
           }

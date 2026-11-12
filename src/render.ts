@@ -21,6 +21,8 @@ import type { CropOptions } from './crop';
 import { layoutText } from './textLayout';
 import type { TextMeasure } from './textLayout';
 import { graphemes, textContent } from './textModel';
+import { paintBackgroundImage } from './backgrounds';
+import { paintImageFrame } from './frames';
 import type { ResolvedTextStyle } from './textModel';
 
 export type ImageAssets = ReadonlyMap<string, CanvasImageSource>;
@@ -624,9 +626,27 @@ function roundedRect(
   ctx.closePath();
 }
 
-function paintFrame(ctx: CanvasRenderingContext2D, doc: ImageDocument) {
+/** Natural pixel size of a decoded asset, or undefined when it has none. */
+export function assetSize(image: CanvasImageSource | undefined) {
+  if (!image) return undefined;
+  try {
+    return sourceDimensions(image);
+  } catch {
+    return undefined;
+  }
+}
+function paintFrame(
+  ctx: CanvasRenderingContext2D,
+  doc: ImageDocument,
+  assets: ImageAssets
+) {
   const frame = doc.frame;
   if (!frame || frame.style === 'none' || frame.width <= 0) return;
+  if (frame.style === 'image') {
+    const image = frame.image && assets.get(frame.image.source);
+    paintImageFrame(ctx, frame, image, assetSize(image), doc);
+    return;
+  }
   const width = Math.min(frame.width, Math.min(doc.width, doc.height) / 2),
     radius = doc.cornerRadius ?? 0;
   ctx.save();
@@ -639,24 +659,30 @@ function paintFrame(ctx: CanvasRenderingContext2D, doc: ImageDocument) {
   ) {
     const bottom =
       frame.style === 'polaroid' ? Math.min(doc.height / 2, width * 3) : width;
+    // An outside frame covers exactly the margins it added, in their current
+    // orientation, so a rotated Polaroid never paints over the photo.
+    const inner =
+      frame.placement === 'outside' && frame.margins
+        ? frame.margins
+        : { top: width, right: width, bottom, left: width };
     // Draw the border as a single even-odd path so translucent frame colors do not double at corners.
     ctx.beginPath();
     ctx.rect(0, 0, doc.width, doc.height);
     ctx.rect(
-      width,
-      width,
-      Math.max(0, doc.width - 2 * width),
-      Math.max(0, doc.height - width - bottom)
+      inner.left,
+      inner.top,
+      Math.max(0, doc.width - inner.left - inner.right),
+      Math.max(0, doc.height - inner.top - inner.bottom)
     );
     ctx.fill('evenodd');
     if (frame.style === 'mat') {
       ctx.strokeStyle = 'rgba(0,0,0,0.24)';
       ctx.lineWidth = Math.max(1, width / 18);
       ctx.strokeRect(
-        width,
-        width,
-        doc.width - 2 * width,
-        doc.height - 2 * width
+        inner.left,
+        inner.top,
+        doc.width - inner.left - inner.right,
+        doc.height - inner.top - inner.bottom
       );
     }
   } else if (frame.style === 'bevel') {
@@ -780,6 +806,19 @@ function compose(
     ctx.fillRect(0, 0, frameDoc.width, frameDoc.height);
     ctx.restore();
   }
+  if (frameDoc.backgroundImage) {
+    const backgroundImage = assets.get(frameDoc.backgroundImage.source);
+    ctx.save();
+    if (decoration) apply(ctx, decoration.matrix);
+    paintBackgroundImage(
+      ctx,
+      frameDoc.backgroundImage,
+      backgroundImage,
+      assetSize(backgroundImage),
+      frameDoc
+    );
+    ctx.restore();
+  }
   ctx.save();
   apply(ctx, doc.imageMatrix);
   ctx.drawImage(filteredSource(image, doc.effects), 0, 0);
@@ -819,7 +858,7 @@ function compose(
   });
   ctx.save();
   if (decoration) apply(ctx, decoration.matrix);
-  paintFrame(ctx, frameDoc);
+  paintFrame(ctx, frameDoc, assets);
   ctx.restore();
   ctx.restore();
   cache.set(image, { doc, assets, canvas, base, mask, decoration });
@@ -850,6 +889,7 @@ export function paintCropPreview(
     doc.frame.style === 'none' &&
     !doc.cornerRadius &&
     (!doc.background || doc.background === 'transparent') &&
+    !doc.backgroundImage &&
     !doc.layers.some(
       (layer) =>
         (layer.kind === 'redaction' || layer.erase) &&
@@ -881,6 +921,7 @@ export function paintCropPreview(
   const overflow: ImageDocument = {
     ...transformDocument(doc, stageView, previewWidth, previewHeight),
     background: 'transparent',
+    backgroundImage: undefined,
     frame: { ...doc.frame, style: 'none' },
     cornerRadius: 0,
   };

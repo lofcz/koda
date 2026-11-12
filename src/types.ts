@@ -3,6 +3,17 @@ import type { ImageDocument } from './model';
 import type { ImageExportOptions } from './exportOptions';
 import type { RichTextRenderer } from './RichTextInput';
 import type { CropOptions } from './crop';
+import type { ImageEditorFont, FontReadiness } from './fonts';
+import type { ImageEditorFrame } from './frames';
+import type { ImageEditorBackground } from './backgrounds';
+export type {
+  ImageEditorFont,
+  ImageEditorFontFace,
+  FontReadiness,
+  FontStatus,
+} from './fonts';
+export type { ImageEditorFrame } from './frames';
+export type { ImageEditorBackground } from './backgrounds';
 export type {
   CropOptions,
   CropPreset,
@@ -28,6 +39,11 @@ export type {
   TextRun,
   TextStyle,
   ResolvedTextStyle,
+  BackgroundImage,
+  BackgroundFit,
+  FrameImage,
+  FrameRepeat,
+  SliceInsets,
 } from './model';
 export type ImageEditorLocale = 'en' | 'cs' | 'sk' | 'pl' | (string & {});
 export type ImageEditorTranslations = Record<string, Record<string, string>>;
@@ -77,6 +93,14 @@ export interface ImageEditorOptions {
   crop?: CropOptions;
   /** A loader must return origin-clean pixels; aborted loads may never replace the current draft. */
   imageLoader?: ImageEditorImageLoader;
+  /** Fonts the text panel offers, replacing the built-in list. Families stored in documents but missing here still render with their CSS fallback. */
+  fonts?: readonly ImageEditorFont[];
+  /** Milliseconds getBlob(), Save and fontsReady() wait for catalog fonts before drawing with the fallback. Default 5000. */
+  fontLoadTimeout?: number;
+  /** Image (9-slice) frames listed after the built-in frames. Chosen frames are embedded in the document. */
+  frames?: readonly ImageEditorFrame[];
+  /** Image backgrounds offered in the background panel. Chosen images are embedded in the document. */
+  backgrounds?: readonly ImageEditorBackground[];
   features?: {
     imageEditor?: {
       dock?: 'left' | 'right';
@@ -108,7 +132,10 @@ export interface ImageEditorInstance {
   destroy(): void;
   /** Exports pixels without selection/UI chrome. Pending crop and text edits are committed first. */
   getImage(options?: ImageExportOptions): string | null;
+  /** Waits for catalog fonts the document uses (see `fontLoadTimeout`) before encoding. */
   getBlob(options?: ImageExportOptions): Promise<Blob>;
+  /** Resolves when the document's catalog fonts loaded, failed or timed out; getImage() is synchronous and does not wait. */
+  fontsReady(timeout?: number): Promise<FontReadiness>;
   /** Independent, validated output settings, suitable for persistence alongside the document. */
   getExportOptions(): ImageExportOptions;
   /** Independent JSON-safe editable state; the host owns the original image source separately. */

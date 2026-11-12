@@ -10,6 +10,7 @@ import { CanvasEngine, EngineState } from './engine';
 import { CanvasSurface, PathState, SurfaceActions } from './CanvasSurface';
 import { alignLayers, distributeLayers, duplicateLayers } from './interactions';
 import {
+  applyFrame,
   DEFAULT_EFFECTS,
   DEFAULT_FRAME,
   duplicateLayer,
@@ -60,8 +61,23 @@ import {
 } from './RichTextInput';
 import { Icon } from './icons';
 import { translator } from './locale';
+import { DEFAULT_FONTS } from './fonts';
+import {
+  BackgroundImageSection,
+  clampTileScale,
+  FrameOptions,
+  fontPatch,
+  ImageFrameButtons,
+  setBackgroundFromFile,
+  tileScalePercent,
+  useFontChoices,
+} from './AssetPanels';
 import type { EditorTool, ImageEditorProps } from './types';
 
+/** A vector preset does not carry a previous image frame's pixels. */
+function vectorFrame({ image: _image, ...frame }: ImageDocument['frame']) {
+  return frame;
+}
 function commonValue<T>(values: readonly T[]): T | null {
   return values.length && values.every((value) => Object.is(value, values[0]))
     ? values[0]
@@ -277,13 +293,23 @@ function ChoicePicker({
   onChange,
   t,
   testId,
+  onOpen,
 }: {
   label: string;
   value: string | null;
-  choices: readonly { value: string; label: string; group?: string }[];
+  choices: readonly {
+    value: string;
+    label: string;
+    group?: string;
+    /** Preview styling, e.g. a font option drawn in its own face. */
+    style?: React.CSSProperties;
+    /** Trailing state such as loading or unavailable. */
+    status?: React.ReactNode;
+  }[];
   onChange(value: string): void;
   t(key: string): string;
   testId?: string;
+  onOpen?(): void;
 }) {
   const [open, setOpen] = useState(false),
     [query, setQuery] = useState('');
@@ -342,10 +368,18 @@ function ChoicePicker({
         aria-controls={`${id}-list`}
         onClick={() => {
           setQuery('');
+          if (!open) onOpen?.();
           setOpen(!open);
         }}
       >
-        <span id={`${id}-value`}>
+        <span
+          id={`${id}-value`}
+          style={
+            value === null
+              ? undefined
+              : choices.find((item) => item.value === value)?.style
+          }
+        >
           {value === null
             ? t('selection.mixed')
             : (choices.find((item) => item.value === value)?.label ?? value)}
@@ -380,7 +414,10 @@ function ChoicePicker({
                     trigger.current?.focus();
                   }}
                 >
-                  {item.label}
+                  <span className="rie-choice-label" style={item.style}>
+                    {item.label}
+                  </span>
+                  {item.status}
                   {item.value === value ? <Icon name="check" /> : null}
                 </button>
               </React.Fragment>
@@ -460,6 +497,8 @@ export function EditorUI({
 }) {
   const doc = state.document,
     t = translator(state.options),
+    fonts = state.options.fonts ?? DEFAULT_FONTS,
+    fontChoices = useFontChoices(fonts, t),
     shell = useRef<HTMLDivElement>(null),
     nav = useRef<HTMLElement>(null),
     surface = useRef<SurfaceActions>(null),
@@ -1359,6 +1398,8 @@ export function EditorUI({
     setSaving(true);
     try {
       if (tool === 'crop') applyCrop(true);
+      // getImage() is synchronous; never encode text with a still-loading font.
+      await engine.fontsReady();
       const dataUrl = engine.getImage();
       if (!dataUrl) throw new Error('Editor is not ready');
       const blob = await engine.getBlob();
@@ -2465,20 +2506,13 @@ export function EditorUI({
               <ChoicePicker
                 label={t('text.font_family')}
                 value={textMarks.fontFamily ?? null}
-                choices={[
-                  { value: 'sans-serif', label: t('text.sans') },
-                  { value: 'serif', label: t('text.serif') },
-                  { value: 'monospace', label: t('text.mono') },
-                  { value: 'Arial, sans-serif', label: 'Arial' },
-                  { value: 'Georgia, serif', label: 'Georgia' },
-                  { value: 'Verdana, sans-serif', label: 'Verdana' },
-                  {
-                    value: '"Trebuchet MS", sans-serif',
-                    label: 'Trebuchet MS',
-                  },
-                ]}
-                onChange={(fontFamily) => formatText({ fontFamily })}
+                choices={fontChoices.choices}
+                onOpen={fontChoices.loadAll}
+                onChange={(fontFamily) =>
+                  formatText(fontPatch(fonts, fontFamily, weight))
+                }
                 t={t}
+                testId="native-text-font"
               />
               <div className="rie-grid">
                 <NumberField
@@ -2882,10 +2916,9 @@ export function EditorUI({
               aria-pressed={doc.frame.style === style}
               data-testid={`native-frame-${style}`}
               onClick={() =>
-                engine.commit({
-                  ...doc,
-                  frame: {
-                    ...doc.frame,
+                engine.commit(
+                  applyFrame(doc, {
+                    ...vectorFrame(doc.frame),
                     style,
                     width:
                       doc.frame.width ||
@@ -2893,32 +2926,46 @@ export function EditorUI({
                         8,
                         Math.round(Math.min(doc.width, doc.height) * 0.04)
                       ),
-                  },
-                })
+                  })
+                )
               }
             >
               <span className="rie-frame-preview" data-frame={style} />
               <span>{t(`frame.${style}`)}</span>
             </button>
           ))}
+          {state.options.frames?.length ||
+          (doc.frame.style === 'image' && doc.frame.image) ? (
+            <ImageFrameButtons
+              engine={engine}
+              doc={doc}
+              catalog={state.options.frames ?? []}
+              t={t}
+              onError={setError}
+            />
+          ) : null}
         </div>
         {doc.frame.style !== 'none' ? (
           <>
-            <ColorField
-              label={t('draw.color')}
-              value={doc.frame.color}
-              onChange={(color) =>
-                engine.commit({ ...doc, frame: { ...doc.frame, color } })
-              }
-            />
+            <FrameOptions engine={engine} doc={doc} t={t} onError={setError} />
+            {doc.frame.style !== 'image' ? (
+              <ColorField
+                label={t('draw.color')}
+                value={doc.frame.color}
+                onChange={(color) =>
+                  engine.commit({ ...doc, frame: { ...doc.frame, color } })
+                }
+              />
+            ) : null}
             <SliderField
               label={t('frame.width')}
               value={doc.frame.width}
               min={1}
               max={Math.floor(Math.min(doc.width, doc.height) / 3)}
               suffix=" px"
+              testId="native-frame-width"
               onChange={(width) =>
-                engine.preview({ ...doc, frame: { ...doc.frame, width } })
+                engine.preview(applyFrame(doc, { ...doc.frame, width }))
               }
               {...gesture}
             />
@@ -2941,7 +2988,10 @@ export function EditorUI({
         <button
           type="button"
           onClick={() =>
-            engine.commit({ ...doc, frame: DEFAULT_FRAME, cornerRadius: 0 })
+            engine.commit({
+              ...applyFrame(doc, DEFAULT_FRAME),
+              cornerRadius: 0,
+            })
           }
         >
           {t('actions.reset')}
@@ -2966,6 +3016,53 @@ export function EditorUI({
           <span className="rie-transparent-preview" />
           {t('fill.transparent')}
         </button>
+        <BackgroundImageSection
+          engine={engine}
+          doc={doc}
+          catalog={state.options.backgrounds ?? []}
+          t={t}
+        >
+          {doc.backgroundImage?.fit === 'repeat' ? (
+            <SliderField
+              label={t('fill.tile_size')}
+              value={tileScalePercent(doc)}
+              min={1}
+              max={400}
+              suffix="%"
+              testId="native-fill-tile-size"
+              onChange={(percent) =>
+                engine.preview({
+                  ...doc,
+                  backgroundImage: {
+                    ...doc.backgroundImage!,
+                    scale: clampTileScale(percent),
+                  },
+                })
+              }
+              {...gesture}
+            />
+          ) : null}
+          {doc.backgroundImage ? (
+            <SliderField
+              label={t('draw.opacity')}
+              value={Math.round(doc.backgroundImage.opacity * 100)}
+              min={0}
+              max={100}
+              suffix="%"
+              testId="native-fill-image-opacity"
+              onChange={(opacity) =>
+                engine.preview({
+                  ...doc,
+                  backgroundImage: {
+                    ...doc.backgroundImage!,
+                    opacity: opacity / 100,
+                  },
+                })
+              }
+              {...gesture}
+            />
+          ) : null}
+        </BackgroundImageSection>
       </>
     );
   if (tool === 'redact')
@@ -3438,7 +3535,12 @@ export function EditorUI({
             onImportImage={
               state.options.features?.imageEditor?.tools?.stickers === false
                 ? undefined
-                : (file) => void importImage(file)
+                : (file) =>
+                    void (tool === 'fill'
+                      ? setBackgroundFromFile(engine, file).catch(() =>
+                          setError(t('status.import_failed'))
+                        )
+                      : importImage(file))
             }
             t={t}
           />

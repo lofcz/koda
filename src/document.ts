@@ -22,7 +22,26 @@ export type {
   TextRun,
   TextStyle,
   ResolvedTextStyle,
+  BackgroundImage,
+  BackgroundFit,
+  FrameImage,
+  FrameRepeat,
+  SliceInsets,
 } from './model';
+export {
+  backgroundPlacement,
+  parseBackgroundImage,
+  DEFAULT_BACKGROUND_IMAGE,
+} from './backgrounds';
+export {
+  parseFrameImage,
+  nineSlice,
+  sliceScale,
+  frameImageInsets,
+  frameMargins,
+  validSlice,
+} from './frames';
+export { applyFrame } from './model';
 export {
   normalizeTextRuns,
   textContent,
