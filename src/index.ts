@@ -17,6 +17,12 @@ export {
   centerCropOnSource,
   cropBleedInsets,
 } from './crop';
+export {
+  LAYER_RIGHTS,
+  parseLayerRights,
+  parseLayerRightsDefaults,
+  resolveLayerRights,
+} from './rights';
 export { RichTextInput } from './RichTextInput';
 export { DEFAULT_FONTS } from './fonts';
 export type {

@@ -14,6 +14,17 @@ export type {
 } from './fonts';
 export type { ImageEditorFrame } from './frames';
 export type { ImageEditorBackground } from './backgrounds';
+import type {
+  LayerRights,
+  LayerRightsDefaults,
+  ResolvedLayerRights,
+} from './rights';
+export type {
+  LayerRight,
+  LayerRights,
+  LayerRightsDefaults,
+  ResolvedLayerRights,
+} from './rights';
 export type {
   CropOptions,
   CropPreset,
@@ -91,6 +102,11 @@ export interface ImageEditorOptions {
   export?: ImageExportOptions;
   /** Non-destructive crop behavior and shared gesture/input constraints. */
   crop?: CropOptions;
+  /**
+   * Default editing rights: `all` first, then per layer kind. A layer's own
+   * `rights` override these; `locked` still denies every selection-based right.
+   */
+  layerRights?: LayerRightsDefaults;
   /** A loader must return origin-clean pixels; aborted loads may never replace the current draft. */
   imageLoader?: ImageEditorImageLoader;
   /** Fonts the text panel offers, replacing the built-in list. Families stored in documents but missing here still render with their CSS fallback. */
@@ -144,6 +160,10 @@ export interface ImageEditorInstance {
   restoreDocument(document: ImageDocument | string): Promise<void>;
   /** Import an image as an editable, embedded layer. */
   addImage(url: string): Promise<void>;
+  /** Effective rights of a layer, after editor defaults and `locked`; null if absent. */
+  getLayerRights(id: string): ResolvedLayerRights | null;
+  /** Replace one layer's own rights (null clears them) without an undoable edit. */
+  setLayerRights(id: string, rights: LayerRights | null): void;
   /** Original loaded pixels for thumbnails and comparison. */
   getSource(): CanvasImageSource | null;
   /** Original encoded source, independent of crop, layers and output settings. */

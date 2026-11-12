@@ -3,6 +3,7 @@ import {
   dimensions,
   DocumentHistory,
   ImageDocument,
+  Layer,
   parseDocument,
   translate,
 } from './model';
@@ -20,6 +21,15 @@ import {
 import type { FontReadiness } from './fonts';
 import { parseFrameCatalog } from './frames';
 import { parseBackgroundCatalog } from './backgrounds';
+import {
+  defaultRights,
+  parseLayerRights,
+  parseLayerRightsDefaults,
+  rightsResolver,
+  type LayerRights,
+  type ResolvedLayerRights,
+  type RightsResolver,
+} from './rights';
 import { parseExportOptions } from './exportOptions';
 import { parseCropOptions } from './crop';
 import {
@@ -176,6 +186,8 @@ export class CanvasEngine implements ImageEditorInstance {
   /** Decoded image layers are owned by the engine; documents only contain serializable sources. */
   assets = new Map<string, CanvasImageSource>();
   image: LoadedImage | null = null;
+  /** Effective layer rights under the current `layerRights` option. Identity changes with the option. */
+  rights: RightsResolver = defaultRights;
   constructor(private loader: ImageLoader = loadImage) {}
   getSnapshot = () => this.state;
   /** UI drafts share history transaction ownership, including no-op undo/restore. */
@@ -338,8 +350,21 @@ export class CanvasEngine implements ImageEditorInstance {
       presentation.backgrounds = parseBackgroundCatalog(
         presentation.backgrounds
       );
+    if (
+      'layerRights' in presentation &&
+      presentation.layerRights !== this.state.options.layerRights
+    ) {
+      presentation.layerRights = parseLayerRightsDefaults(
+        presentation.layerRights
+      );
+      this.rights = presentation.layerRights
+        ? rightsResolver(presentation.layerRights)
+        : defaultRights;
+    }
     this.emit({ options: { ...this.state.options, ...presentation } });
     if (presentation.fonts !== undefined) this.syncFonts();
+    // Newly denied selection drops out of the current selection.
+    if ('layerRights' in presentation) this.selectMany(this.state.selectedIds);
     if (url !== undefined && url !== this.url)
       void this.reset(url).catch(() => {
         /* Failure is exposed in state and the component callback. */
@@ -373,7 +398,8 @@ export class CanvasEngine implements ImageEditorInstance {
         this.history.current,
         this.image.source,
         output,
-        this.assets
+        this.assets,
+        this.rights
       ),
       dataUrl = canvas.toDataURL(output.type, output.quality);
     return output.metadata === 'strip'
@@ -402,7 +428,8 @@ export class CanvasEngine implements ImageEditorInstance {
       this.history.current,
       this.image.source,
       output,
-      this.assets
+      this.assets,
+      this.rights
     );
     const exif = this.sourceExif;
     const blob = await new Promise<Blob>((resolve, reject) =>
@@ -652,7 +679,7 @@ export class CanvasEngine implements ImageEditorInstance {
   selectMany(ids: readonly string[]) {
     const selectedIds = [...new Set(ids)].filter((id) =>
       this.state.document?.layers.some(
-        (layer) => layer.id === id && !layer.locked && !layer.hidden
+        (layer) => layer.id === id && this.selectable(layer)
       )
     );
     this.emit({ selectedIds, selected: selectedIds.at(-1) ?? null });
@@ -671,7 +698,7 @@ export class CanvasEngine implements ImageEditorInstance {
       this.documentRevision++;
     const selectedIds = this.state.selectedIds.filter((id) =>
         this.history!.current.layers.some(
-          (layer) => layer.id === id && !layer.locked && !layer.hidden
+          (layer) => layer.id === id && this.selectable(layer)
         )
       ),
       selected = selectedIds.at(-1) ?? null;
@@ -720,14 +747,46 @@ export class CanvasEngine implements ImageEditorInstance {
     this.history?.redo();
     this.publish(before !== this.history?.current);
   }
+  /** Removes the selected layers that allow deletion; protected members stay. */
   removeSelected() {
     const doc = this.state.document;
     if (doc && this.state.selectedIds.length)
       this.commit({
         ...doc,
         layers: doc.layers.filter(
-          (layer) => !this.state.selectedIds.includes(layer.id) || layer.locked
+          (layer) =>
+            !this.state.selectedIds.includes(layer.id) ||
+            !this.rights(layer).delete
         ),
       });
+  }
+  private selectable(layer: Layer) {
+    return !layer.hidden && this.rights(layer).select;
+  }
+  /** Effective rights of a layer in the current document, or null when it does not exist. */
+  getLayerRights(id: string): ResolvedLayerRights | null {
+    const layer = this.history?.current.layers.find((item) => item.id === id);
+    return layer ? this.rights(layer) : null;
+  }
+  /**
+   * Replace a layer's own rights (`null` clears them). Rights are policy, not an edit:
+   * every undo/redo snapshot is updated too, so history cannot restore earlier rights.
+   */
+  setLayerRights(id: string, rights: LayerRights | null) {
+    if (this.state.phase !== 'ready' || !this.history) return;
+    const parsed = parseLayerRights(rights ?? undefined);
+    this.history.rewrite((doc) =>
+      doc.layers.some((layer) => layer.id === id)
+        ? {
+            ...doc,
+            layers: doc.layers.map((layer) => {
+              if (layer.id !== id) return layer;
+              const { rights: _previous, ...rest } = layer;
+              return parsed ? { ...rest, rights: parsed } : rest;
+            }),
+          }
+        : doc
+    );
+    this.publish(true);
   }
 }

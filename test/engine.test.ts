@@ -552,14 +552,16 @@ it('output options are merged at export and encoded quality is validated without
     doc,
     engine.getSource(),
     { type: 'image/webp', quality: 0.8, width: 50 },
-    engine.assets
+    engine.assets,
+    engine.rights
   );
   await engine.getBlob({ type: 'image/jpeg', background: '#fff' });
   expect(exportCanvas).toHaveBeenLastCalledWith(
     doc,
     engine.getSource(),
     { type: 'image/jpeg', quality: 0.8, background: '#fff' },
-    engine.assets
+    engine.assets,
+    engine.rights
   );
   expect(() => engine.getImage({ quality: 2 })).toThrow('quality');
   expect(engine.getSnapshot().document).toBe(doc);
@@ -586,7 +588,8 @@ it('invalid export settings leave pending UI work untouched and undefined format
     expect.objectContaining({ width: 20, height: 12 }),
     engine.getSource(),
     { type: 'image/png' },
-    engine.assets
+    engine.assets,
+    engine.rights
   );
 });
 

@@ -72,6 +72,12 @@ import {
   tileScalePercent,
   useFontChoices,
 } from './AssetPanels';
+import {
+  allowsPatch,
+  allowsTextEdit,
+  deniedRights,
+  type LayerRight,
+} from './rights';
 import type { EditorTool, ImageEditorProps } from './types';
 
 /** A vector preset does not carry a previous image frame's pixels. */
@@ -120,6 +126,7 @@ function NumberField({
   onEnd,
   min = 1,
   max = 8192,
+  disabled,
 }: {
   label: string;
   value: number | null;
@@ -131,6 +138,7 @@ function NumberField({
   onEnd?(): void;
   min?: number;
   max?: number;
+  disabled?: boolean;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -151,6 +159,7 @@ function NumberField({
         min={min}
         max={max}
         step={step}
+        disabled={disabled}
         data-testid={testId}
         onFocus={onStart}
         onChange={(event) => {
@@ -183,14 +192,16 @@ function ColorField({
   value,
   onChange,
   mixedLabel,
+  disabled,
 }: {
   label: string;
   value: string | null;
   onChange(value: string): void;
   mixedLabel?: string;
+  disabled?: boolean;
 }) {
   return (
-    <fieldset className="rie-color-field">
+    <fieldset className="rie-color-field" disabled={disabled}>
       <legend>
         {label}
         {value === null ? (
@@ -241,6 +252,7 @@ function SliderField({
   onEnd,
   step = 1,
   suffix = '',
+  disabled,
 }: {
   label: string;
   value: number;
@@ -252,6 +264,7 @@ function SliderField({
   onEnd?(): void;
   step?: number;
   suffix?: string;
+  disabled?: boolean;
 }) {
   return (
     <label className="rie-label">
@@ -268,6 +281,7 @@ function SliderField({
         max={max}
         step={step}
         value={value}
+        disabled={disabled}
         data-testid={testId}
         onPointerDown={onStart}
         onPointerUp={onEnd}
@@ -294,6 +308,7 @@ function ChoicePicker({
   t,
   testId,
   onOpen,
+  disabled,
 }: {
   label: string;
   value: string | null;
@@ -310,6 +325,7 @@ function ChoicePicker({
   t(key: string): string;
   testId?: string;
   onOpen?(): void;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false),
     [query, setQuery] = useState('');
@@ -366,6 +382,7 @@ function ChoicePicker({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={`${id}-list`}
+        disabled={disabled}
         onClick={() => {
           setQuery('');
           if (!open) onOpen?.();
@@ -386,7 +403,7 @@ function ChoicePicker({
         </span>
         <Icon name="chevron_down" />
       </button>
-      {open ? (
+      {open && !disabled ? (
         <div className="rie-picker-popup">
           <input
             ref={search}
@@ -802,6 +819,45 @@ export function EditorUI({
     doc?.layers.filter((item) => selectedIds.includes(item.id)) ?? [];
   const isGroup = selectedLayers.length > 1;
   const textLayers = selectedLayers.filter((item) => item.kind === 'text');
+  // Controls stay enabled while any selected member allows the change; edits skip the others.
+  const rightsOf = engine.rights,
+    allows = (right: LayerRight, items: readonly Layer[] = selectedLayers) =>
+      items.some((item) => rightsOf(item)[right]),
+    deniedTitle = (key: string) =>
+      t(isGroup ? 'rights.denied_group' : 'rights.denied').replace(
+        '{action}',
+        t(key)
+      ),
+    rightsList = (items: readonly Layer[]) =>
+      [...new Set(items.flatMap((item) => deniedRights(item, rightsOf)))].map(
+        (right) => t(`rights.${right}`)
+      ),
+    deniedList = rightsList(selectedLayers),
+    rightsNotice = deniedList.length ? (
+      <p
+        className="rie-help rie-rights-notice"
+        role="note"
+        data-testid="native-rights-notice"
+      >
+        <Icon name="rights" />
+        <span>
+          {t(isGroup ? 'rights.notice_group' : 'rights.notice').replace(
+            '{list}',
+            deniedList.join(', ')
+          )}
+        </span>
+      </p>
+    ) : null;
+  // Double-click guidance must match what double-click does for the selected text.
+  const textHint = !textLayers.length
+    ? t('text.hint')
+    : textLayers.every(
+          (item) => !rightsOf(item).editText && !rightsOf(item).style
+        )
+      ? t('rights.text_fixed_hint')
+      : textLayers.every((item) => !rightsOf(item).editText)
+        ? t('rights.text_format_hint')
+        : t('text.hint');
   const textValue = (item: Layer): RichTextValue => ({
     text: textContent(item),
     runs: item.textRuns,
@@ -994,13 +1050,14 @@ export function EditorUI({
     key: string,
     action: () => void,
     isDisabled = false,
-    testId?: string
+    testId?: string,
+    deniedRight?: LayerRight
   ) => (
     <button
       type="button"
       className="rie-icon-button"
       aria-label={t(key)}
-      title={t(key)}
+      title={deniedRight && !allows(deniedRight) ? deniedTitle(key) : t(key)}
       disabled={disabled || isDisabled}
       onClick={action}
       data-testid={testId}
@@ -1009,10 +1066,12 @@ export function EditorUI({
     </button>
   );
   const changeLayer = (patch: Partial<Layer>) => {
-    if (doc && layer) engine.commit(updateLayer(doc, layer.id, patch));
+    if (doc && layer && allowsPatch(layer, patch, rightsOf(layer)))
+      engine.commit(updateLayer(doc, layer.id, patch));
   };
   const previewLayer = (patch: Partial<Layer>) => {
-    if (doc && layer) engine.preview(updateLayer(doc, layer.id, patch));
+    if (doc && layer && allowsPatch(layer, patch, rightsOf(layer)))
+      engine.preview(updateLayer(doc, layer.id, patch));
   };
   const changeSelection = (
     patch: Partial<Layer>,
@@ -1021,7 +1080,9 @@ export function EditorUI({
   ) => {
     if (!doc) return;
     const next = selectedLayers
-      .filter(accepts)
+      .filter(
+        (item) => accepts(item) && allowsPatch(item, patch, rightsOf(item))
+      )
       .map((item) => item.id)
       .reduce((document, id) => {
         const item = document.layers.find((item) => item.id === id)!;
@@ -1110,7 +1171,9 @@ export function EditorUI({
     const next = {
       ...document,
       layers: document.layers.map((item) =>
-        current.selectedIds.includes(item.id) && item.kind === 'text'
+        current.selectedIds.includes(item.id) &&
+        item.kind === 'text' &&
+        allowsPatch(item, patch, rightsOf(item))
           ? fitTextLayer({ ...item, ...patch })
           : item
       ),
@@ -1132,6 +1195,11 @@ export function EditorUI({
       return;
     const item = document.layers.find((item) => item.id === layer.id);
     if (!item) return;
+    if (!allowsTextEdit(item, value, rightsOf(item))) {
+      // Re-render the owned value so the field drops the denied edit.
+      engine.preview(document);
+      return;
+    }
     engine.begin();
     engine.preview(
       updateLayer(
@@ -1154,7 +1222,11 @@ export function EditorUI({
     const next = {
       ...document,
       layers: document.layers.map((item) => {
-        if (!current.selectedIds.includes(item.id) || item.kind !== 'text')
+        if (
+          !current.selectedIds.includes(item.id) ||
+          item.kind !== 'text' ||
+          !rightsOf(item).style
+        )
           return item;
         const value = formatRichText(
           textValue(item),
@@ -1338,7 +1410,7 @@ export function EditorUI({
     syncAngle(-angle);
   };
   const reorder = (direction: number) => {
-    if (!doc || !layer) return;
+    if (!doc || !layer || !rightsOf(layer).reorder) return;
     engine.commit(
       reorderLayer(doc, layer.id, direction > 0 ? 'forward' : 'backward')
     );
@@ -1420,14 +1492,32 @@ export function EditorUI({
             String(selectedLayers.length)
           )}
         </p>
+        {tool === 'text' ? null : rightsNotice}
         <div className="rie-row">
-          {iconButton('duplicate', 'actions.duplicate', () => {
-            const copy = duplicateLayers(doc, selectedIds);
-            engine.commit(copy.document);
-            engine.selectMany(copy.ids);
-          })}
-          {iconButton('delete', 'actions.delete', () =>
-            engine.removeSelected()
+          {iconButton(
+            'duplicate',
+            'actions.duplicate',
+            () => {
+              const copy = duplicateLayers(
+                doc,
+                selectedIds,
+                (item) => rightsOf(item).duplicate
+              );
+              if (!copy.ids.length) return;
+              engine.commit(copy.document);
+              engine.selectMany(copy.ids);
+            },
+            !allows('duplicate'),
+            undefined,
+            'duplicate'
+          )}
+          {iconButton(
+            'delete',
+            'actions.delete',
+            () => engine.removeSelected(),
+            !allows('delete'),
+            undefined,
+            'delete'
           )}
         </div>
         <fieldset className="rie-control-group">
@@ -1440,9 +1530,18 @@ export function EditorUI({
                 {iconButton(
                   `objects_${alignment}`,
                   `selection.align_${alignment}`,
-                  () => engine.commit(alignLayers(doc, selectedIds, alignment)),
-                  false,
-                  `native-align-${alignment}`
+                  () =>
+                    engine.commit(
+                      alignLayers(
+                        doc,
+                        selectedIds,
+                        alignment,
+                        (item) => rightsOf(item).move
+                      )
+                    ),
+                  !allows('move'),
+                  `native-align-${alignment}`,
+                  'move'
                 )}
               </React.Fragment>
             ))}
@@ -1451,9 +1550,19 @@ export function EditorUI({
                 {iconButton(
                   `distribute_${axis}`,
                   `selection.distribute_${axis}`,
-                  () => engine.commit(distributeLayers(doc, selectedIds, axis)),
-                  selectedIds.length < 3,
-                  `native-distribute-${axis}`
+                  () =>
+                    engine.commit(
+                      distributeLayers(
+                        doc,
+                        selectedIds,
+                        axis,
+                        (item) => rightsOf(item).move
+                      )
+                    ),
+                  selectedLayers.filter((item) => rightsOf(item).move).length <
+                    3,
+                  `native-distribute-${axis}`,
+                  'move'
                 )}
               </React.Fragment>
             ))}
@@ -1477,6 +1586,7 @@ export function EditorUI({
                 )
             )}
             mixedLabel={t('selection.mixed')}
+            disabled={!allows('style')}
             onChange={(color) => changeSelection({ color }, false, hasColor)}
           />
         ) : null}
@@ -1488,10 +1598,12 @@ export function EditorUI({
                 selectedLayers.filter(hasFill).map((item) => item.fill)
               )}
               mixedLabel={t('selection.mixed')}
+              disabled={!allows('style')}
               onChange={(fill) => changeSelection({ fill }, false, hasFill)}
             />
             <button
               type="button"
+              disabled={!allows('style')}
               onClick={() =>
                 changeSelection({ fill: 'transparent' }, false, hasFill)
               }
@@ -1509,6 +1621,7 @@ export function EditorUI({
             mixedLabel={t('selection.mixed')}
             min={0}
             max={300}
+            disabled={!allows('style')}
             onCommit={(strokeWidth) =>
               changeSelection({ strokeWidth }, false, hasStroke)
             }
@@ -1522,6 +1635,7 @@ export function EditorUI({
           mixedLabel={t('selection.mixed')}
           min={0}
           max={100}
+          disabled={!allows('style')}
           onCommit={(opacity) => changeSelection({ opacity: opacity / 100 })}
         />
       </div>
@@ -1530,33 +1644,79 @@ export function EditorUI({
     groupControls
   ) : layer && doc ? (
     <div className="rie-stack" data-testid="native-selection-controls">
+      {tool === 'text' ? null : rightsNotice}
       <div className="rie-row">
-        {iconButton('duplicate', 'actions.duplicate', () => {
-          const next = duplicateLayer(doc, layer.id);
-          engine.commit(next);
-          engine.select(
-            next.layers.find(
-              (item) => !doc.layers.some((existing) => existing.id === item.id)
-            )?.id ?? null
-          );
-        })}
-        {iconButton('forward', 'actions.forward', () => reorder(1))}
-        {iconButton('backward', 'actions.backward', () => reorder(-1))}
-        {iconButton('delete', 'actions.delete', () => engine.removeSelected())}
+        {iconButton(
+          'duplicate',
+          'actions.duplicate',
+          () => {
+            if (!rightsOf(layer).duplicate) return;
+            const next = duplicateLayer(doc, layer.id);
+            engine.commit(next);
+            engine.select(
+              next.layers.find(
+                (item) =>
+                  !doc.layers.some((existing) => existing.id === item.id)
+              )?.id ?? null
+            );
+          },
+          !allows('duplicate'),
+          undefined,
+          'duplicate'
+        )}
+        {iconButton(
+          'forward',
+          'actions.forward',
+          () => reorder(1),
+          !allows('reorder'),
+          undefined,
+          'reorder'
+        )}
+        {iconButton(
+          'backward',
+          'actions.backward',
+          () => reorder(-1),
+          !allows('reorder'),
+          undefined,
+          'reorder'
+        )}
+        {iconButton(
+          'delete',
+          'actions.delete',
+          () => engine.removeSelected(),
+          !allows('delete'),
+          undefined,
+          'delete'
+        )}
       </div>
       <div className="rie-row">
-        {iconButton('flip_horizontal', 'rotate.flip_horizontal', () =>
-          changeLayer(flipLayer(layer, true))
+        {iconButton(
+          'flip_horizontal',
+          'rotate.flip_horizontal',
+          () => changeLayer(flipLayer(layer, true)),
+          !allows('flip'),
+          undefined,
+          'flip'
         )}
-        {iconButton('flip_vertical', 'rotate.flip_vertical', () =>
-          changeLayer(flipLayer(layer, false))
+        {iconButton(
+          'flip_vertical',
+          'rotate.flip_vertical',
+          () => changeLayer(flipLayer(layer, false)),
+          !allows('flip'),
+          undefined,
+          'flip'
         )}
         <button
           type="button"
           className="rie-icon-button"
-          title={t('selection.locked')}
+          title={
+            allows('lock')
+              ? t('selection.locked')
+              : deniedTitle('selection.locked')
+          }
           aria-label={t('selection.locked')}
           aria-pressed={!!layer.locked}
+          disabled={!allows('lock')}
           onClick={() => changeLayer({ locked: !layer.locked })}
         >
           <Icon name="lock" />
@@ -1564,9 +1724,14 @@ export function EditorUI({
         <button
           type="button"
           className="rie-icon-button"
-          title={t('selection.hidden')}
+          title={
+            allows('visibility')
+              ? t('selection.hidden')
+              : deniedTitle('selection.hidden')
+          }
           aria-label={t('selection.hidden')}
           aria-pressed={!!layer.hidden}
+          disabled={!allows('visibility')}
           onClick={() => changeLayer({ hidden: !layer.hidden })}
         >
           <Icon name="hidden" />
@@ -1576,6 +1741,7 @@ export function EditorUI({
         <ColorField
           label={t('draw.color')}
           value={layer.color}
+          disabled={!allows('style')}
           onChange={(color) => changeLayer({ color })}
         />
       ) : null}
@@ -1585,6 +1751,7 @@ export function EditorUI({
           value={layer.strokeWidth}
           min={0}
           max={300}
+          disabled={!allows('style')}
           onCommit={(strokeWidth) => changeLayer({ strokeWidth })}
         />
       ) : null}
@@ -1593,11 +1760,13 @@ export function EditorUI({
           <ColorField
             label={t(layer.kind === 'text' ? 'text.background' : 'shapes.fill')}
             value={layer.fill}
+            disabled={!allows('style')}
             onChange={(fill) => changeLayer({ fill })}
           />
           <button
             type="button"
             aria-pressed={layer.fill === 'transparent'}
+            disabled={!allows('style')}
             onClick={() =>
               changeLayer({
                 fill: layer.fill === 'transparent' ? '#0797a7' : 'transparent',
@@ -1614,6 +1783,7 @@ export function EditorUI({
             type="button"
             aria-pressed={pathState.editing}
             data-testid="native-path-edit"
+            disabled={!allows('pathPoints')}
             onClick={() => surface.current?.editPath(layer.id)}
           >
             {t('path.edit')}
@@ -1621,7 +1791,7 @@ export function EditorUI({
           <button
             type="button"
             aria-pressed={!!layer.pathClosed}
-            disabled={(layer.points?.length ?? 0) < 3}
+            disabled={(layer.points?.length ?? 0) < 3 || !allows('pathPoints')}
             onClick={() => changeLayer({ pathClosed: !layer.pathClosed })}
           >
             {t('path.closed')}
@@ -1645,6 +1815,7 @@ export function EditorUI({
                 value,
                 label: t(`shapes.pattern_${value}`),
               }))}
+              disabled={!allows('style')}
               onChange={(value) =>
                 changeLayer({
                   strokeDash:
@@ -1667,6 +1838,7 @@ export function EditorUI({
                 value,
                 label: t(`shapes.cap_${value}`),
               }))}
+              disabled={!allows('style')}
               onChange={(value) =>
                 changeLayer({ strokeCap: value as Layer['strokeCap'] })
               }
@@ -1679,6 +1851,7 @@ export function EditorUI({
                 value,
                 label: t(`shapes.join_${value}`),
               }))}
+              disabled={!allows('style')}
               onChange={(value) =>
                 changeLayer({ strokeJoin: value as Layer['strokeJoin'] })
               }
@@ -1690,6 +1863,7 @@ export function EditorUI({
                 value={layer.cornerRadius ?? 0}
                 min={0}
                 max={Math.min(layer.width, layer.height) / 2}
+                disabled={!allows('style')}
                 onCommit={(cornerRadius) => changeLayer({ cornerRadius })}
               />
             ) : null}
@@ -1697,6 +1871,7 @@ export function EditorUI({
               label={t('shapes.feather')}
               value={layer.feather ?? 0}
               max={100}
+              disabled={!allows('style')}
               onChange={(feather) => previewLayer({ feather })}
               {...gesture}
               suffix=" px"
@@ -1713,6 +1888,7 @@ export function EditorUI({
               value={layer.textOutline?.width ?? 0}
               min={0}
               max={100}
+              disabled={!allows('style')}
               onCommit={(width) =>
                 changeLayer({
                   textOutline: {
@@ -1725,6 +1901,7 @@ export function EditorUI({
             <ColorField
               label={t('text.outline_color')}
               value={layer.textOutline?.color ?? '#ffffff'}
+              disabled={!allows('style')}
               onChange={(color) =>
                 changeLayer({
                   textOutline: { width: layer.textOutline?.width || 2, color },
@@ -1734,6 +1911,7 @@ export function EditorUI({
             <button
               type="button"
               aria-pressed={!!layer.textShadow}
+              disabled={!allows('style')}
               onClick={() =>
                 changeLayer({
                   textShadow: layer.textShadow
@@ -1749,6 +1927,7 @@ export function EditorUI({
                 <ColorField
                   label={t('text.shadow_color')}
                   value={layer.textShadow.color}
+                  disabled={!allows('style')}
                   onChange={(color) =>
                     changeLayer({ textShadow: { ...layer.textShadow!, color } })
                   }
@@ -1758,6 +1937,7 @@ export function EditorUI({
                   value={layer.textShadow.blur}
                   min={0}
                   max={100}
+                  disabled={!allows('style')}
                   onCommit={(blur) =>
                     changeLayer({ textShadow: { ...layer.textShadow!, blur } })
                   }
@@ -1770,6 +1950,7 @@ export function EditorUI({
                       value={layer.textShadow![key]}
                       min={-100}
                       max={100}
+                      disabled={!allows('style')}
                       onCommit={(value) =>
                         changeLayer({
                           textShadow: { ...layer.textShadow!, [key]: value },
@@ -1802,6 +1983,7 @@ export function EditorUI({
                 label: t(`shapes.end_${value}`),
               }))}
               onChange={(value) => changeLayer({ [key]: value })}
+              disabled={!allows('style')}
               t={t}
             />
           ))}
@@ -1810,6 +1992,7 @@ export function EditorUI({
       <SliderField
         label={t('draw.opacity')}
         value={Math.round(layer.opacity * 100)}
+        disabled={!allows('style')}
         onChange={(opacity) => previewLayer({ opacity: opacity / 100 })}
         {...gesture}
         suffix="%"
@@ -1820,6 +2003,7 @@ export function EditorUI({
         min={-360}
         max={360}
         testId="native-selection-rotation"
+        disabled={!allows('rotate')}
         onCommit={(angle) =>
           changeLayer(
             rotateLayer(
@@ -1835,6 +2019,7 @@ export function EditorUI({
           <NumberField
             label={t('resize.width')}
             value={layer.width * Math.hypot(layer.matrix[0], layer.matrix[1])}
+            disabled={!allows('resize')}
             onCommit={(width) =>
               changeLayer({
                 matrix: multiply(
@@ -1852,6 +2037,7 @@ export function EditorUI({
           <NumberField
             label={t('resize.height')}
             value={layer.height * Math.hypot(layer.matrix[2], layer.matrix[3])}
+            disabled={!allows('resize')}
             onCommit={(height) =>
               changeLayer({
                 matrix: multiply(
@@ -2402,6 +2588,9 @@ export function EditorUI({
                 : null;
             },
             defaults: resolveTextStyle(layer),
+            readOnly: !rightsOf(layer).editText,
+            allowNewlines: rightsOf(layer).textNewlines,
+            allowFormatting: rightsOf(layer).style,
             onChange: changeTextContent,
             onSelectionChange: onTextSelection,
             onFocus: onPanelTextFocus,
@@ -2413,10 +2602,16 @@ export function EditorUI({
             testId: 'native-text-content',
           }
         : null;
+    const textStyle = allows('style', textLayers),
+      textBox = allows('textLayout', textLayers),
+      textBoxSize = textLayers.some(
+        (item) => rightsOf(item).textLayout && rightsOf(item).resize
+      );
     controls = (
       <>
         {textLayers.length ? (
           <>
+            {rightsNotice}
             <div className="rie-text-formatting" data-rich-text-toolbar>
               <div
                 className="rie-text-toolbar"
@@ -2440,6 +2635,7 @@ export function EditorUI({
                       aria-label={t(`text.${name}`)}
                       title={t(`text.${name}`)}
                       aria-pressed={pressed === null ? 'mixed' : !!pressed}
+                      disabled={!textStyle}
                       onPointerDown={(event) => event.preventDefault()}
                       onClick={() => {
                         if (name === 'bold')
@@ -2511,6 +2707,7 @@ export function EditorUI({
                 onChange={(fontFamily) =>
                   formatText(fontPatch(fonts, fontFamily, weight))
                 }
+                disabled={!textStyle}
                 t={t}
                 testId="native-text-font"
               />
@@ -2521,6 +2718,7 @@ export function EditorUI({
                   mixedLabel={t('selection.mixed')}
                   max={1000}
                   testId="native-text-size"
+                  disabled={!textStyle}
                   onCommit={(fontSize) => formatText({ fontSize }, true)}
                   {...gesture}
                 />
@@ -2532,6 +2730,7 @@ export function EditorUI({
                   max={1000}
                   step={1}
                   testId="native-text-weight"
+                  disabled={!textStyle}
                   onCommit={(fontWeight) => formatText({ fontWeight }, true)}
                   {...gesture}
                 />
@@ -2540,6 +2739,7 @@ export function EditorUI({
                 label={t('draw.color')}
                 value={textMarks.color ?? null}
                 mixedLabel={t('selection.mixed')}
+                disabled={!textStyle}
                 onChange={(color) => formatText({ color })}
               />
               <details className="rie-advanced">
@@ -2549,10 +2749,12 @@ export function EditorUI({
                     label={t('text.highlight')}
                     value={textMarks.background ?? null}
                     mixedLabel={t('selection.mixed')}
+                    disabled={!textStyle}
                     onChange={(background) => formatText({ background })}
                   />
                   <button
                     type="button"
+                    disabled={!textStyle}
                     onClick={() => formatText({ background: 'transparent' })}
                   >
                     {t('text.clear_highlight')}
@@ -2572,6 +2774,7 @@ export function EditorUI({
                         textLayers.map((item) => item.textAlign ?? 'left')
                       ) === textAlign
                     }
+                    disabled={!textStyle}
                     onClick={() => changeText({ textAlign })}
                   >
                     <Icon name={`align_${textAlign}`} />
@@ -2589,6 +2792,7 @@ export function EditorUI({
                   max={4}
                   step={0.1}
                   testId="native-text-line-height"
+                  disabled={!textStyle}
                   onCommit={(lineHeight) => changeText({ lineHeight }, true)}
                   {...gesture}
                 />
@@ -2600,6 +2804,7 @@ export function EditorUI({
                   max={512}
                   step={0.1}
                   testId="native-text-spacing"
+                  disabled={!textStyle}
                   onCommit={(letterSpacing) =>
                     formatText({ letterSpacing }, true)
                   }
@@ -2633,6 +2838,7 @@ export function EditorUI({
                         textLayout: textLayout as Layer['textLayout'],
                       })
                     }
+                    disabled={!textBox}
                     t={t}
                   />
                   {(['auto-width', 'auto-height', 'fixed'] as const).map(
@@ -2657,6 +2863,7 @@ export function EditorUI({
                       value={commonValue(textLayers.map((item) => item.width))}
                       mixedLabel={t('selection.mixed')}
                       testId="native-text-box-width"
+                      disabled={!textBoxSize}
                       onCommit={(width) => changeText({ width }, true)}
                       {...gesture}
                     />
@@ -2667,6 +2874,7 @@ export function EditorUI({
                       value={commonValue(textLayers.map((item) => item.height))}
                       mixedLabel={t('selection.mixed')}
                       testId="native-text-box-height"
+                      disabled={!textBoxSize}
                       onCommit={(height) => changeText({ height }, true)}
                       {...gesture}
                     />
@@ -3134,7 +3342,7 @@ export function EditorUI({
                 <button
                   type="button"
                   key={item.id}
-                  disabled={item.locked || item.hidden}
+                  disabled={item.hidden || !rightsOf(item).select}
                   aria-pressed={selectedIds.includes(item.id)}
                   onClick={(event) =>
                     multiSelect ||
@@ -3168,13 +3376,39 @@ export function EditorUI({
                         )}
                   </span>
                 </button>
+                {rightsList([item]).length ? (
+                  <span
+                    className="rie-layer-rights"
+                    role="img"
+                    data-testid="native-layer-rights"
+                    aria-label={t('rights.badge').replace(
+                      '{list}',
+                      rightsList([item]).join(', ')
+                    )}
+                    title={t('rights.badge').replace(
+                      '{list}',
+                      rightsList([item]).join(', ')
+                    )}
+                  >
+                    <Icon name="rights" />
+                  </span>
+                ) : null}
                 <button
                   type="button"
                   className="rie-icon-button"
                   aria-label={t('selection.locked')}
-                  title={t('selection.locked')}
+                  title={
+                    rightsOf(item).lock
+                      ? t('selection.locked')
+                      : t('rights.denied').replace(
+                          '{action}',
+                          t('selection.locked')
+                        )
+                  }
                   aria-pressed={!!item.locked}
+                  disabled={!rightsOf(item).lock}
                   onClick={() =>
+                    rightsOf(item).lock &&
                     engine.commit(
                       updateLayer(doc, item.id, { locked: !item.locked })
                     )
@@ -3186,9 +3420,18 @@ export function EditorUI({
                   type="button"
                   className="rie-icon-button"
                   aria-label={t('selection.hidden')}
-                  title={t('selection.hidden')}
+                  title={
+                    rightsOf(item).visibility
+                      ? t('selection.hidden')
+                      : t('rights.denied').replace(
+                          '{action}',
+                          t('selection.hidden')
+                        )
+                  }
                   aria-pressed={!!item.hidden}
+                  disabled={!rightsOf(item).visibility}
                   onClick={() =>
+                    rightsOf(item).visibility &&
                     engine.commit(
                       updateLayer(doc, item.id, { hidden: !item.hidden })
                     )
@@ -3571,7 +3814,9 @@ export function EditorUI({
                           'redact',
                           'stickers',
                         ].includes(tool)
-                      ? t(`${tool === 'text' ? 'text' : tool}.hint`)
+                      ? tool === 'text'
+                        ? textHint
+                        : t(`${tool}.hint`)
                       : ''}
             </span>
           )}

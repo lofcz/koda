@@ -42,6 +42,17 @@ export {
   validSlice,
 } from './frames';
 export { applyFrame } from './model';
+  LAYER_RIGHTS,
+  parseLayerRights,
+  parseLayerRightsDefaults,
+  resolveLayerRights,
+} from './rights';
+export type {
+  LayerRight,
+  LayerRights,
+  LayerRightsDefaults,
+  ResolvedLayerRights,
+} from './rights';
 export {
   normalizeTextRuns,
   textContent,

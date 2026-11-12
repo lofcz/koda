@@ -9,6 +9,8 @@ import {
   setFrame,
 } from './frames';
 import type { FrameImage, SliceInsets } from './frames';
+import { parseLayerRights } from './rights';
+import type { LayerRights } from './rights';
 export type { TextRun, TextStyle, ResolvedTextStyle } from './textModel';
 export type { BackgroundImage, BackgroundFit } from './backgrounds';
 export type { FrameImage, FrameRepeat, SliceInsets } from './frames';
@@ -69,6 +71,11 @@ export type Layer = {
   /** Locked layers render normally, but cannot be selected or edited by gestures. */
   locked?: boolean;
   hidden?: boolean;
+  /**
+   * Host-authored editing rights. Omitted rights are allowed; `locked` additionally
+   * denies selection and every operation that needs it. See `src/rights.ts`.
+   */
+  rights?: LayerRights;
 };
 export type Effects = {
   preset:
@@ -495,7 +502,13 @@ function segmentDistance(p: Point, a: Point, b: Point) {
 }
 /** Accurate path/ellipse/line hit testing; transparent areas do not steal clicks. */
 export function hitLayer(layer: Layer, point: Point, tolerance = 4): boolean {
-  if (layer.hidden || layer.locked || layer.opacity <= 0) return false;
+  if (
+    layer.hidden ||
+    layer.locked ||
+    layer.rights?.select === false ||
+    layer.opacity <= 0
+  )
+    return false;
   if (
     Math.abs(
       layer.matrix[0] * layer.matrix[3] - layer.matrix[1] * layer.matrix[2]
@@ -608,14 +621,16 @@ export function hitLayer(layer: Layer, point: Point, tolerance = 4): boolean {
   }
   return true;
 }
+/** `accept` lets the editor apply option-level rights; unaccepted layers never catch a click. */
 export function hitDocument(
   doc: ImageDocument,
   p: Point,
-  tolerance = 4
+  tolerance = 4,
+  accept: (layer: Layer) => boolean = () => true
 ): Layer | undefined {
   return [...doc.layers]
     .reverse()
-    .find((layer) => hitLayer(layer, p, tolerance));
+    .find((layer) => accept(layer) && hitLayer(layer, p, tolerance));
 }
 export function pathLayer(
   points: readonly Point[],
@@ -829,6 +844,8 @@ export function parseDocument(input: unknown): ImageDocument {
         layer[key] = v[key];
       }
     }
+    const rights = parseLayerRights(v.rights);
+    if (rights) layer.rights = rights;
     if (v.strokeDash !== undefined) {
       if (!Array.isArray(v.strokeDash) || v.strokeDash.length > 32)
         throw new Error('Invalid stroke pattern');
@@ -956,12 +973,32 @@ export class DocumentHistory {
   past: ImageDocument[] = [];
   future: ImageDocument[] = [];
   private transaction: ImageDocument | null = null;
-  baseline: ImageDocument;
+  private _baseline: ImageDocument;
+  get baseline() {
+    return this._baseline;
+  }
   constructor(
     public current: ImageDocument,
     private limit = 100
   ) {
-    this.baseline = current;
+    this._baseline = current;
+  }
+  /**
+   * Apply a policy change to every snapshot, so undo and redo can never restore
+   * what the policy replaced. Shared snapshots stay shared, preserving `changed`.
+   */
+  rewrite(map: (doc: ImageDocument) => ImageDocument) {
+    const cache = new Map<ImageDocument, ImageDocument>();
+    const apply = (doc: ImageDocument) => {
+      let next = cache.get(doc);
+      if (!next) cache.set(doc, (next = map(doc)));
+      return next;
+    };
+    this.past = this.past.map(apply);
+    this.future = this.future.map(apply);
+    this.current = apply(this.current);
+    this._baseline = apply(this._baseline);
+    if (this.transaction) this.transaction = apply(this.transaction);
   }
   get changed() {
     return this.current !== this.baseline;
@@ -977,7 +1014,7 @@ export class DocumentHistory {
   }
   /** Swap in derived data (text re-measured after a font loads) without a history entry. */
   replace(next: ImageDocument) {
-    if (this.current === this.baseline) this.baseline = next;
+    if (this.current === this._baseline) this._baseline = next;
     this.current = next;
   }
   commit(next = this.current) {
