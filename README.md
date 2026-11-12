@@ -83,7 +83,8 @@ Each pointer gesture and text editing transaction is one undo step. History reta
 | Method                                     | Contract                                                                                                                      |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | `getImage(options?): string \| null`       | Current image data URL, or null while not ready. Applies pending crop and text edits first. Defaults to PNG.                  |
-| `getBlob(options?): Promise<Blob>`         | The same export as a Blob; rejects while not ready.                                                                           |
+| `getBlob(options?): Promise<Blob>`         | The same export as a Blob; rejects while not ready. Waits for catalog fonts the document uses (see `fontLoadTimeout`).        |
+| `fontsReady(timeout?)`                     | Resolves `{ loaded, failed }` catalog font ids; failed includes timeouts. `getImage()` is synchronous; await this first.      |
 | `getDocument(): ImageDocument \| null`     | Independent JSON-safe editable state, including embedded sticker images. Flushes pending edits.                               |
 | `restoreDocument(document): Promise<void>` | Validate and restore a document or serialized JSON against the currently loaded original source.                              |
 | `addImage(url): Promise<void>`             | Load and embed an image as a new editable layer.                                                                              |
@@ -165,6 +166,47 @@ const options = {
 The default interaction focus is `selection`. Set `aspectRatio` to require a host-defined ratio. Size presets also set export dimensions when applied. The crop normally stays within the transformed original image; `allowOutsideImage` permits transparent or filled margins, and `enableLimitToggle` lets users change that choice. Cropping retains the original pixels, so a later crop can recover previously excluded areas.
 
 Guides support `none`, `thirds`, `grid`, `diagonals`, or custom fractional `columns` and `rows`. Handle styles are `circle`, `hook` and `invisible`. `maskOpacity`, `showSize`, `enableZoom`, `enableRotation` and `rotationRange` configure the remaining controls. Guides and handles never appear in exports. Pure crop validation and geometry helpers are also exported from the server-safe `/document` entry.
+
+### Fonts, backgrounds and image frames
+
+```tsx
+import { DEFAULT_FONTS } from '@lofcz/react-image-editor';
+
+const options = {
+  fonts: [
+    ...DEFAULT_FONTS,
+    {
+      id: 'inter',
+      label: 'Inter',
+      family: '"Inter", sans-serif',
+      group: 'Brand',
+      weights: [400, 700],
+      source: [{ url: '/fonts/inter-var.woff2', weight: '100 900' }],
+    },
+    // Already declared by the host page with @font-face:
+    { id: 'brand', label: 'Brand', family: 'Brand, serif', source: 'host' },
+  ],
+  fontLoadTimeout: 5000,
+  backgrounds: [
+    { id: 'paper', label: 'Paper', url: '/bg/paper.png', fit: 'repeat' },
+  ],
+  frames: [
+    {
+      id: 'gilded',
+      label: 'Gilded',
+      url: '/frames/gilded.png',
+      slice: { top: 40, right: 40, bottom: 40, left: 40 },
+      repeat: 'round',
+    },
+  ],
+};
+```
+
+`fonts` replaces the text panel's list; `DEFAULT_FONTS` is the built-in list. Fonts with a face list are loaded through the `FontFace` API; `'host'` fonts are awaited with `document.fonts.load()`; `'system'` (the default) loads nothing. The searchable picker loads catalog fonts when it opens, previews each one in its own face and marks fonts that are loading or failed. Auto-sized text boxes are re-measured when a face arrives, without an undo step. `getBlob()`, Save and `fontsReady()` wait up to `fontLoadTimeout` milliseconds (default 5000); fonts that fail or time out are drawn with the next family in their CSS stack, and the export logs a warning. Documents keep every family string, including families missing from the catalog, and draw them with the CSS fallback.
+
+The background panel adds an image below the photo: a host catalog image, an upload, or an image dropped or pasted on the canvas while the panel is open. It shows through transparent pixels and outside-image crop margins. `backgroundImage` stores `fit` (`cover`, `contain`, `stretch` or `repeat`), a 0–1 `position` anchor, a repeat tile `scale` and `opacity`.
+
+Image frames are 9-slice images: corners keep their size, edges `stretch`, `repeat` (centered, clipped) or `round` (whole tiles), and the center stays empty. `frame.width` is the thickness of the widest side in document pixels. Every frame can sit over the photo (`placement: 'inside'`, default) or around it (`'outside'`), which grows the canvas by the frame and shrinks it again when the frame changes. Chosen catalog images are embedded in the document as PNG data URLs with their slice insets and source size, so documents restore without the catalog; documents may also reference an image URL, which `restoreDocument` loads through the image loader.
 
 ## Migrating from version 1
 
