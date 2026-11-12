@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { launchBrowser } from './browser-env.mjs';
 import { blockFont } from './fixtures/block-font.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -91,10 +91,7 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   await mkdir(shots, { recursive: true });
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.CHROMIUM_PATH,
-  });
+  browser = await launchBrowser();
 
   /* ------------------------------------------------ font readiness/export */
   {

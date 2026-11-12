@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { createTouch, launchBrowser } from './browser-env.mjs';
 
 // Per-layer editing rights, exercised through pointer, touch, keyboard, the panels and export.
 const port = Number(process.env.EDITOR_RIGHTS_PORT ?? 4239),
@@ -70,10 +70,7 @@ try {
     if (i === 119) throw new Error(log);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.CHROMIUM_PATH,
-  });
+  browser = await launchBrowser();
   const page = await browser.newPage({
       viewport: { width: 1180, height: 800 },
     }),
@@ -212,13 +209,13 @@ try {
   assert.deepEqual((await layer('caption')).matrix, caption.matrix);
   assert.equal((await layer('caption')).width, caption.width);
   // Touch drag uses the same gesture path; poll frame-aligned pointer events.
-  const cdp = await page.context().newCDPSession(page);
+  const touchInput = await createTouch(page);
   const touchFrom = await world(150, 84);
   const touch = (type, points) =>
-    cdp.send('Input.dispatchTouchEvent', {
+    touchInput.send(
       type,
-      touchPoints: points.map(([x, y], id) => ({ x, y, id })),
-    });
+      points.map(([x, y], id) => ({ x, y, id }))
+    );
   await touch('touchStart', [[touchFrom.x, touchFrom.y]]);
   for (let i = 1; i <= 6; i++) {
     await touch('touchMove', [[touchFrom.x + i * 12, touchFrom.y + i * 9]]);

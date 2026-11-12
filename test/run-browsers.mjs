@@ -26,6 +26,10 @@ const portVariables = [
   'EDITOR_TEXT_UI_PORT',
   'EDITOR_UI_TEST_PORT',
   'EDITOR_A11Y_PORT',
+  'EDITOR_CROP_OVERLAYS_PORT',
+  'EDITOR_ASSETS_PORT',
+  'EDITOR_RIGHTS_PORT',
+  'EDITOR_REPLACE_BASE_PORT',
 ];
 const ports = process.env.EDITOR_PORT_BASE
   ? Object.fromEntries(
