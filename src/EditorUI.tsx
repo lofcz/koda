@@ -2710,7 +2710,7 @@ export function EditorUI({
               <FilterPreview
                 engine={engine}
                 preset={preset}
-                revision={state.imageRevision}
+                revision={state.sourceRevision}
               />
               <span>{t(`filters.${preset}`)}</span>
             </button>

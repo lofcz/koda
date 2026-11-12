@@ -860,61 +860,94 @@ function equalValue(a: unknown, b: unknown): boolean {
   );
 }
 
-/** One pointer gesture is one history entry, regardless of pointer sample count. */
-export class DocumentHistory {
-  past: ImageDocument[] = [];
-  future: ImageDocument[] = [];
-  private transaction: ImageDocument | null = null;
+type HistoryEntry<S> = { document: ImageDocument; source: S };
+/** One pointer gesture is one history entry, regardless of pointer sample count.
+ * Every entry also owns an opaque source reference, so an undo step can restore
+ * replaced source pixels together with the document drawn over them. Dropped
+ * entries release their references. */
+export class DocumentHistory<S = undefined> {
+  private pastEntries: HistoryEntry<S>[] = [];
+  private futureEntries: HistoryEntry<S>[] = [];
+  private transaction: HistoryEntry<S> | null = null;
   readonly baseline: ImageDocument;
+  readonly baselineSource: S;
   constructor(
     public current: ImageDocument,
-    private limit = 100
+    private limit = 100,
+    public source: S = undefined as S
   ) {
     this.baseline = current;
+    this.baselineSource = source;
+  }
+  get past(): readonly ImageDocument[] {
+    return this.pastEntries.map((entry) => entry.document);
+  }
+  get future(): readonly ImageDocument[] {
+    return this.futureEntries.map((entry) => entry.document);
+  }
+  get canUndo() {
+    return this.pastEntries.length > 0;
+  }
+  get canRedo() {
+    return this.futureEntries.length > 0;
   }
   get changed() {
-    return this.current !== this.baseline;
+    return (
+      this.current !== this.baseline || this.source !== this.baselineSource
+    );
   }
   get inTransaction() {
     return this.transaction !== null;
   }
   begin() {
-    if (!this.transaction) this.transaction = this.current;
+    if (!this.transaction)
+      this.transaction = { document: this.current, source: this.source };
   }
   preview(next: ImageDocument) {
     this.current = next;
   }
-  commit(next = this.current) {
-    const before = this.transaction ?? this.current;
+  /** A different source is always a change, even over an identical document. */
+  commit(next = this.current, source = this.source) {
+    const before = this.transaction ?? {
+      document: this.current,
+      source: this.source,
+    };
     this.transaction = null;
-    if (equalValue(before, next)) {
-      this.current = before;
+    if (source === before.source && equalValue(before.document, next)) {
+      this.current = before.document;
+      this.source = before.source;
       return false;
     }
-    this.past.push(before);
-    if (this.past.length > this.limit) this.past.shift();
-    this.future = [];
+    this.pastEntries.push(before);
+    if (this.pastEntries.length > this.limit) this.pastEntries.shift();
+    this.futureEntries = [];
     this.current = next;
+    this.source = source;
     return true;
   }
   cancel() {
-    if (this.transaction) this.current = this.transaction;
+    if (this.transaction) {
+      this.current = this.transaction.document;
+      this.source = this.transaction.source;
+    }
     this.transaction = null;
   }
   undo() {
     this.cancel();
-    const before = this.past.pop();
+    const before = this.pastEntries.pop();
     if (before) {
-      this.future.push(this.current);
-      this.current = before;
+      this.futureEntries.push({ document: this.current, source: this.source });
+      this.current = before.document;
+      this.source = before.source;
     }
   }
   redo() {
     this.cancel();
-    const next = this.future.pop();
+    const next = this.futureEntries.pop();
     if (next) {
-      this.past.push(this.current);
-      this.current = next;
+      this.pastEntries.push({ document: this.current, source: this.source });
+      this.current = next.document;
+      this.source = next.source;
     }
   }
 }
