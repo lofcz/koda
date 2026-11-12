@@ -591,6 +591,18 @@ const labels: Record<string, readonly [string, string, string, string]> = {
     '{action}: pri vybraných objektoch vypnuté',
     '{action}: wyłączone dla zaznaczonych obiektów',
   ],
+  'rights.text_fixed_hint': [
+    'This text cannot be changed.',
+    'Tento text nelze měnit.',
+    'Tento text sa nedá meniť.',
+    'Tego tekstu nie można zmienić.',
+  ],
+  'rights.text_format_hint': [
+    'Double-click text to format it on the image. The wording stays fixed.',
+    'Dvojklikem můžete text v obrázku formátovat. Jeho znění měnit nelze.',
+    'Dvojklikom môžete text v obrázku formátovať. Jeho znenie sa meniť nedá.',
+    'Kliknij tekst dwukrotnie, aby sformatować go na obrazie. Treści nie można zmienić.',
+  ],
   'rights.select': ['selecting', 'výběr', 'výber', 'zaznaczanie'],
   'rights.move': ['moving', 'přesun', 'presun', 'przesuwanie'],
   'rights.resize': [

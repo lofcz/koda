@@ -803,8 +803,27 @@ function compose(
     baseContext.drawImage(canvas, 0, 0);
     mask ??= surface(doc.width, doc.height).canvas;
   }
+  // A protected redaction samples the full scene beneath it. Keep what it rendered
+  // there, so an eraser above restores those pixels instead of re-sampling a
+  // scene that lacks the erasable markup the redaction actually covered.
+  const redactions = new Map<string, HTMLCanvasElement>();
+  let lastEraser = -1;
+  doc.layers.forEach((layer, index) => {
+    if (layer.erase && !layer.hidden) lastEraser = index;
+  });
   doc.layers.forEach((layer, index) => {
     renderLayer(ctx, layer, assets);
+    if (
+      index < lastEraser &&
+      layer.kind === 'redaction' &&
+      layer.redactionMode !== 'solid' &&
+      !layer.hidden &&
+      !rights(layer).erase
+    ) {
+      const scene = surface(doc.width, doc.height).canvas;
+      scene.getContext('2d')!.drawImage(canvas, 0, 0);
+      redactions.set(layer.id, scene);
+    }
     if (layer.erase && !layer.hidden && base && mask) {
       if (mask.width !== doc.width || mask.height !== doc.height) {
         mask.width = doc.width;
@@ -828,8 +847,22 @@ function compose(
         const keptContext = kept.getContext('2d')!;
         keptContext.clearRect(0, 0, doc.width, doc.height);
         keptContext.drawImage(base, 0, 0);
-        for (const item of protectedLayers)
-          renderLayer(keptContext, item, assets);
+        for (const item of protectedLayers) {
+          const scene = redactions.get(item.id);
+          if (!scene) {
+            renderLayer(keptContext, item, assets);
+            continue;
+          }
+          keptContext.save();
+          apply(keptContext, item.matrix);
+          keptContext.beginPath();
+          keptContext.rect(0, 0, item.width, item.height);
+          keptContext.clip();
+          keptContext.clearRect(0, 0, item.width, item.height);
+          keptContext.setTransform(1, 0, 0, 1, 0, 0);
+          keptContext.drawImage(scene, 0, 0);
+          keptContext.restore();
+        }
         restore = kept;
       }
       maskContext.drawImage(restore, 0, 0);

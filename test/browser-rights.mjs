@@ -390,6 +390,20 @@ try {
   fixed = await layer('fixed');
   assert.equal(fixed.text, 'Hello');
   assert.equal(fixed.textRuns, undefined);
+  // The status hint never promises a double-click edit the rights deny.
+  const hint = () => page.locator('.rie-tool-hint').innerText();
+  assert.equal(await hint(), 'This text cannot be changed.');
+  await page.evaluate(() =>
+    window.localEditor.setLayerRights('fixed', { editText: false })
+  );
+  await frames();
+  assert.equal(
+    await hint(),
+    'Double-click text to format it on the image. The wording stays fixed.'
+  );
+  await page.evaluate(() => window.localEditor.setLayerRights('fixed', null));
+  await frames();
+  assert.equal(await hint(), 'Double-click text to edit it on the image.');
   await page.getByTestId('native-tool-select').click();
 
   // 3. A fixed text box: no side or corner handles, layout controls are disabled.
@@ -656,6 +670,63 @@ try {
   assert.deepEqual(pixels.protected, [255, 0, 255, 255]);
   assert.deepEqual(pixels.kept, [0, 255, 0, 255]);
   await page.getByTestId('native-tool-select').click();
+
+  // A protected redaction keeps exactly the pixels it shows without the eraser,
+  // sampled from the full scene, even though the markup beneath it is erased.
+  const exportPixels = (points) =>
+    page.evaluate(async (points) => {
+      const image = new Image();
+      image.src = window.localEditor.getImage();
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const context = canvas.getContext('2d');
+      context.drawImage(image, 0, 0);
+      return points.map(([x, y]) => [...context.getImageData(x, y, 1, 1).data]);
+    }, points);
+  const redactionScene = (eraser) => [
+    rect('marker', 40, 40, { width: 200, height: 200, fill: '#ffff00' }),
+    {
+      ...rect('cover', 80, 80, { width: 120, height: 120 }),
+      kind: 'redaction',
+      fill: 'transparent',
+      redactionMode: 'pixelate',
+      redactionSize: 16,
+      rights: { erase: false },
+    },
+    ...(eraser
+      ? [
+          {
+            ...rect('eraser', 0, 0, { width: 300, height: 1 }),
+            kind: 'path',
+            fill: 'transparent',
+            color: '#000000',
+            strokeWidth: 300,
+            erase: true,
+            points: [
+              { x: 0, y: 140 },
+              { x: 300, y: 140 },
+            ],
+            matrix: [1, 0, 0, 1, 0, 0],
+          },
+        ]
+      : []),
+  ];
+  const probes = [
+    [50, 50],
+    [90, 90],
+    [140, 140],
+    [195, 195],
+  ];
+  await load(redactionScene(false));
+  const unerased = await exportPixels(probes);
+  assert.deepEqual(unerased[0], [255, 255, 0, 255]);
+  assert.deepEqual(unerased[2], [255, 255, 0, 255], 'Pixelated marker');
+  await load(redactionScene(true));
+  const erased = await exportPixels(probes);
+  assert.deepEqual(erased[0], [255, 0, 0, 255], 'Marker erased to the photo');
+  assert.deepEqual(erased.slice(1), unerased.slice(1));
 
   // 11. Visual review: light/dark and a 358px-wide editor.
   await load([

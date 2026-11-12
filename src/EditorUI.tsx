@@ -802,6 +802,16 @@ export function EditorUI({
         </span>
       </p>
     ) : null;
+  // Double-click guidance must match what double-click does for the selected text.
+  const textHint = !textLayers.length
+    ? t('text.hint')
+    : textLayers.every(
+          (item) => !rightsOf(item).editText && !rightsOf(item).style
+        )
+      ? t('rights.text_fixed_hint')
+      : textLayers.every((item) => !rightsOf(item).editText)
+        ? t('rights.text_format_hint')
+        : t('text.hint');
   const textValue = (item: Layer): RichTextValue => ({
     text: textContent(item),
     runs: item.textRuns,
@@ -3640,7 +3650,9 @@ export function EditorUI({
                           'redact',
                           'stickers',
                         ].includes(tool)
-                      ? t(`${tool === 'text' ? 'text' : tool}.hint`)
+                      ? tool === 'text'
+                        ? textHint
+                        : t(`${tool}.hint`)
                       : ''}
             </span>
           )}
