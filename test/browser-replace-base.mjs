@@ -319,6 +319,66 @@ try {
     same: true,
     layers: ['redaction', 'path', 'text'],
   });
+  // A different-aspect AI result keeps its proportions: a square result over the
+  // 600x400 document is cover-fitted (scale 1.5, 100px cropped top and bottom),
+  // so a blue square at (150,150)-(250,250) lands at (225,125)-(375,275), not a
+  // 150x100 stretched rectangle. Its red top band is cropped away.
+  const beforeSquare = await snapshot(),
+    beforeSquareBase = await baseImage();
+  await page.evaluate(async () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 400;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#00ff00';
+    ctx.fillRect(0, 0, 400, 400);
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(0, 0, 400, 60);
+    ctx.fillStyle = '#0000ff';
+    ctx.fillRect(150, 150, 100, 100);
+    await window.localEditor.replaceBase(canvas.toDataURL('image/png'));
+  });
+  assert.deepEqual((await doc()).imageMatrix, [1.5, 0, 0, 1.5, 0, -100]);
+  const square = await pixels(await baseImage(), {
+    top: [300, 130],
+    bottom: [300, 268],
+    left: [232, 200],
+    right: [368, 200],
+    above: [300, 118],
+    edge: [300, 5],
+  });
+  assert.deepEqual(square.size, [600, 400]);
+  for (const point of ['top', 'bottom', 'left', 'right'])
+    assert.deepEqual(square[point], [0, 0, 255, 255], `Square keeps ${point}`);
+  assert.deepEqual(square.above, [0, 255, 0, 255], 'No vertical stretch');
+  assert.deepEqual(square.edge, [0, 255, 0, 255], 'Cropped band stays hidden');
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  assert.equal(await snapshot(), beforeSquare, 'Undo restores exact pixels');
+  assert.equal(await baseImage(), beforeSquareBase);
+  // A rounding-sized difference (601x400, 0.17%) is stretched to the exact rect.
+  await page.evaluate(async () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 601;
+    canvas.height = 400;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#00ff00';
+    ctx.fillRect(0, 0, 601, 400);
+    await window.localEditor.replaceBase(canvas.toDataURL('image/png'));
+  });
+  const near = await doc();
+  assert.equal(near.imageMatrix[0], 600 / 601);
+  assert.deepEqual(near.imageMatrix.slice(1), [0, 0, 1, 0, 0]);
+  const nearPixels = await pixels(await baseImage(), {
+    first: [0, 0],
+    last: [599, 399],
+  });
+  assert.deepEqual(
+    nearPixels.first,
+    [0, 255, 0, 255],
+    'Stretch fills the rect'
+  );
+  assert.deepEqual(nearPixels.last, [0, 255, 0, 255]);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  assert.equal(await snapshot(), beforeSquare);
   assert.deepEqual(errors, []);
   console.info(
     JSON.stringify({
@@ -331,6 +391,8 @@ try {
       redoReappliesReplacement: true,
       filterPreviewsRefresh: true,
       saveReopenRoundTrip: true,
+      differentAspectCoverFit: true,
+      roundingAspectStretch: true,
     })
   );
 } finally {

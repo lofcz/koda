@@ -115,7 +115,8 @@ export interface ImageEditorInstance {
   getBaseImage(options?: ImageExportOptions): string | null;
   /**
    * Replace the base pixels (usually an edited getBaseImage() result) as one undoable edit.
-   * The new source is stretched to fill the document; geometry and adjustments it already
+   * The new source fills the document: an aspect difference up to 1.5% is stretched, a larger
+   * one is centered and cover-fitted without distortion. Geometry and adjustments it already
    * contains are reset. Layers, frame and background stay editable. Undo restores the
    * previous source pixels, geometry and adjustments. The latest call wins; a failed or
    * superseded load, or a base changed while loading, rejects and leaves the draft untouched.

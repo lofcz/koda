@@ -1,5 +1,10 @@
 import { vi } from 'vitest';
-import { CanvasEngine, LoadedImage } from '../src/engine';
+import {
+  BASE_STRETCH_TOLERANCE,
+  CanvasEngine,
+  LoadedImage,
+  placeBase,
+} from '../src/engine';
 import {
   cropDocument,
   DEFAULT_EFFECTS,
@@ -358,4 +363,65 @@ it('history entries keep sources only while they are reachable', () => {
   history.cancel();
   expect(history.current).toBe(doc);
   expect(history.source).toBe('c');
+});
+
+it('stretches rounding-sized aspect differences and cover-fits larger ones', () => {
+  const doc = { width: 80, height: 60 };
+  // Same aspect and a 0.6% difference: stretched to the exact document rect.
+  expect(placeBase(doc, { width: 160, height: 120 })).toEqual([
+    0.5, 0, 0, 0.5, 0, 0,
+  ]);
+  expect(placeBase(doc, { width: 161, height: 120 })).toEqual([
+    80 / 161,
+    0,
+    0,
+    0.5,
+    0,
+    0,
+  ]);
+  expect(BASE_STRETCH_TOLERANCE).toBe(0.015);
+  // 1.6% wider: cover-fitted, centered, aspect preserved.
+  const wide = placeBase(doc, { width: 1626, height: 1200 });
+  expect(wide[0]).toBe(wide[3]);
+  expect(wide[0]).toBeCloseTo(0.05);
+  expect(wide[5]).toBeCloseTo(0);
+  expect(wide[4]).toBeCloseTo((80 - 1626 * 0.05) / 2);
+  // A square result over a 4:3 document covers the width and crops top and bottom.
+  expect(placeBase(doc, { width: 120, height: 120 })).toEqual([
+    2 / 3,
+    0,
+    0,
+    2 / 3,
+    0,
+    -10,
+  ]);
+  // A tall document crops the sides instead.
+  expect(
+    placeBase({ width: 60, height: 80 }, { width: 120, height: 120 })
+  ).toEqual([2 / 3, 0, 0, 2 / 3, -10, 0]);
+});
+
+it('replaceBase cover-fits a different-aspect result and undo restores the stretch-free state', async () => {
+  const { engine, layer, loader } = await draft(),
+    before = engine.getSnapshot().document!;
+  loader.mockResolvedValueOnce(image(120, 120, 'square'));
+  await engine.replaceBase('square');
+  expect(engine.getSnapshot().document).toMatchObject({
+    width: 80,
+    height: 60,
+    imageMatrix: [2 / 3, 0, 0, 2 / 3, 0, -10],
+    layers: [layer],
+  });
+  engine.undo();
+  expect(engine.getSnapshot().document).toBe(before);
+  loader.mockResolvedValueOnce(image(161, 120, 'near'));
+  await engine.replaceBase('near');
+  expect(engine.getSnapshot().document!.imageMatrix).toEqual([
+    80 / 161,
+    0,
+    0,
+    0.5,
+    0,
+    0,
+  ]);
 });

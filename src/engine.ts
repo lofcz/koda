@@ -7,6 +7,7 @@ import {
   parseDocument,
   scale,
   translate,
+  type Matrix,
 } from './model';
 import { exportCanvas } from './render';
 import { parseExportOptions } from './exportOptions';
@@ -124,6 +125,32 @@ function baseDocument(doc: ImageDocument): ImageDocument {
     frame: { ...doc.frame, style: 'none' },
     cornerRadius: 0,
   };
+}
+/** Largest relative aspect difference that is stretched rather than cover-fitted. */
+export const BASE_STRETCH_TOLERANCE = 0.015;
+/**
+ * Image models return a nearby supported size. A rounding-sized aspect difference is
+ * stretched invisibly, keeping masks and layers exactly aligned. A larger difference is
+ * cover-fitted and centered, preserving the aspect ratio: the model rendered the same
+ * scene for its own canvas. Overflowing pixels stay in the source, recoverable by crop.
+ */
+export function placeBase(
+  doc: Pick<ImageDocument, 'width' | 'height'>,
+  image: { width: number; height: number }
+): Matrix {
+  const x = doc.width / image.width,
+    y = doc.height / image.height;
+  if (Math.max(x, y) / Math.min(x, y) - 1 <= BASE_STRETCH_TOLERANCE)
+    return scale(x, y);
+  const factor = Math.max(x, y);
+  return [
+    factor,
+    0,
+    0,
+    factor,
+    (doc.width - image.width * factor) / 2,
+    (doc.height - image.height * factor) / 2,
+  ];
 }
 const baseKey = (doc: ImageDocument) =>
   JSON.stringify([doc.width, doc.height, doc.imageMatrix, doc.effects]);
@@ -457,10 +484,7 @@ export class CanvasEngine implements ImageEditorInstance {
       this.history.commit(
         {
           ...doc,
-          imageMatrix: scale(
-            doc.width / image.width,
-            doc.height / image.height
-          ),
+          imageMatrix: placeBase(doc, image),
           effects: DEFAULT_EFFECTS,
         },
         { image, exif, key: ++this.sourceKey }
