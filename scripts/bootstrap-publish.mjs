@@ -51,7 +51,7 @@ run(npm, [
   'github',
   pkg.name,
   '--repo',
-  'lofcz/react-image-editor',
+  'lofcz/koda',
   '--file',
   'release.yml',
   '--allow-publish',
@@ -59,5 +59,5 @@ run(npm, [
 ]);
 run(npm, ['trust', 'list', pkg.name]);
 console.info(
-  'Bootstrap complete. Future releases: gh workflow run release.yml -R lofcz/react-image-editor'
+  'Bootstrap complete. Future releases: gh workflow run release.yml -R lofcz/koda'
 );

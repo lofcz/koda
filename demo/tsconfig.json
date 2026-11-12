@@ -12,7 +12,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "paths": {
-      "@lofcz/react-image-editor": ["../src/index.ts"]
+      "koda-editor": ["../src/index.ts"]
     }
   }
 }

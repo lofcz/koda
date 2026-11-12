@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import ImageEditor, {
   type ImageEditorChange,
   type ImageEditorInstance,
-} from '@lofcz/react-image-editor';
+} from 'koda-editor';
 
 const source = document.createElement('canvas');
 source.width = 600;

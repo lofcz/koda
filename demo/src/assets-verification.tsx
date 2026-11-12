@@ -5,7 +5,7 @@ import ImageEditor, {
   DEFAULT_FONTS,
   type ImageEditorInstance,
   type ImageEditorOptions,
-} from '@lofcz/react-image-editor';
+} from 'koda-editor';
 
 const canvas = (
   width: number,

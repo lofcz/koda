@@ -36,10 +36,10 @@ try {
     console.log('document module works without React or DOM');
   `;
   for (const [format, statement] of [
-    ['commonjs', "const api = require('@lofcz/react-image-editor/document');"],
+    ['commonjs', "const api = require('koda-editor/document');"],
     [
       'module',
-      "const api = await import('@lofcz/react-image-editor/document');",
+      "const api = await import('koda-editor/document');",
     ],
   ]) {
     const result = spawnSync(

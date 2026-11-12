@@ -16,7 +16,7 @@ permissions:
 jobs:
   # Firefox and WebKit run beside the release job; it publishes only if both pass.
   browsers:
-    if: github.repository == 'lofcz/react-image-editor' && github.ref == 'refs/heads/main'
+    if: github.repository == 'lofcz/koda' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -38,7 +38,7 @@ jobs:
         timeout-minutes: 20
   release:
     needs: browsers
-    if: github.repository == 'lofcz/react-image-editor' && github.ref == 'refs/heads/main'
+    if: github.repository == 'lofcz/koda' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write

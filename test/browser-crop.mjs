@@ -493,7 +493,7 @@ try {
   );
 } catch (error) {
   await page
-    ?.screenshot({ path: '/tmp/pintura-crop-interactions-failure.png' })
+    ?.screenshot({ path: '/tmp/koda-crop-interactions-failure.png' })
     .catch(() => {});
   throw error;
 } finally {

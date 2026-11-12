@@ -1,7 +1,7 @@
 {
-  "name": "@lofcz/react-image-editor",
+  "name": "koda-editor",
   "version": "2.2.0",
-  "description": "A fully local React image editor with an editable Canvas2D document, layers and history",
+  "description": "Image editor for React: crop, adjust, annotate, redact, frame and export.",
   "type": "commonjs",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -94,14 +94,11 @@
     "vitest": "4.1.10"
   },
   "author": "lofcz",
-  "contributors": [
-    "Unlayer (original React wrapper)"
-  ],
-  "homepage": "https://github.com/lofcz/react-image-editor#readme",
+  "homepage": "https://lofcz.github.io/koda/",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lofcz/react-image-editor.git"
+    "url": "git+https://github.com/lofcz/koda.git"
   },
   "keywords": [
     "react",
