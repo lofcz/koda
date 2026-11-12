@@ -87,6 +87,8 @@ Each pointer gesture and text editing transaction is one undo step. History reta
 | `getDocument(): ImageDocument \| null`     | Independent JSON-safe editable state, including embedded sticker images. Flushes pending edits.                               |
 | `restoreDocument(document): Promise<void>` | Validate and restore a document or serialized JSON against the currently loaded original source.                              |
 | `addImage(url): Promise<void>`             | Load and embed an image as a new editable layer.                                                                              |
+| `getLayerRights(id)`                       | Effective rights of a layer after editor defaults and `locked`, or null when the layer does not exist.                        |
+| `setLayerRights(id, rights \| null)`       | Replace one layer's own rights. Also rewrites undo/redo history, so undo never restores earlier rights.                       |
 | `getSource(): CanvasImageSource \| null`   | Original source pixels for comparison or custom previews.                                                                     |
 | `getSourceBlob(): Promise<Blob>`           | Original encoded source bytes, retained from the successful load; rejects while not ready.                                    |
 | `getExportOptions(): ImageExportOptions`   | Independent copy of the current output settings for persistence.                                                              |
@@ -165,6 +167,39 @@ const options = {
 The default interaction focus is `selection`. Set `aspectRatio` to require a host-defined ratio. Size presets also set export dimensions when applied. The crop normally stays within the transformed original image; `allowOutsideImage` permits transparent or filled margins, and `enableLimitToggle` lets users change that choice. Cropping retains the original pixels, so a later crop can recover previously excluded areas.
 
 Guides support `none`, `thirds`, `grid`, `diagonals`, or custom fractional `columns` and `rows`. Handle styles are `circle`, `hook` and `invisible`. `maskOpacity`, `showSize`, `enableZoom`, `enableRotation` and `rotationRange` configure the remaining controls. Guides and handles never appear in exports. Pure crop validation and geometry helpers are also exported from the server-safe `/document` entry.
+
+### Layer rights
+
+A layer can carry host-authored `rights`. Every right defaults to `true`; set one to `false` to deny it. Rights are part of the JSON document, are validated by `parseDocument` (unknown rights are rejected so an older editor never drops a denial) and are also exported from the server-safe `/document` entry.
+
+```ts
+const caption = {
+  ...layer,
+  kind: 'text',
+  // Text can be edited, but not moved, resized, deleted or broken into lines.
+  rights: { move: false, resize: false, delete: false, textNewlines: false },
+};
+const options = {
+  // Defaults: `all` first, then per layer kind. A layer's own rights win.
+  layerRights: { all: { reorder: false }, image: { style: false } },
+};
+```
+
+| Right                            | Denies                                                                                                      |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `select`                         | Canvas clicks, Select all and the layer list. Clicks pass through to layers below.                          |
+| `move`                           | Drag, arrow keys, align and distribute.                                                                     |
+| `resize`, `rotate`, `flip`       | Corner/edge handles and size fields; rotation handle, Alt+arrows and field; flip buttons.                   |
+| `delete`, `duplicate`, `reorder` | Delete/Backspace and buttons; Ctrl/Cmd+D and buttons; Ctrl/Cmd+[ / ] and stacking buttons.                  |
+| `style`                          | Colors, fill, stroke, opacity, feather, line ends, text effects and all text formatting.                    |
+| `editText`, `textNewlines`       | Text content (the editor opens read-only); new line breaks (Enter is ignored, pasted breaks become spaces). |
+| `textLayout`                     | Text layout mode and box size, including the text box handles.                                              |
+| `pathPoints`                     | Editing, inserting and removing path points, and opening or closing the path.                               |
+| `erase`                          | Eraser strokes above the layer no longer remove its pixels.                                                 |
+| `snap`                           | Other layers no longer snap to this layer.                                                                  |
+| `lock`, `visibility`             | Toggling `locked` and `hidden`.                                                                             |
+
+Denying `select`, or a `locked: true` layer, also denies every right from `move` to `pathPoints`; `textNewlines` needs `editText`. `locked` keeps its previous meaning: render-only and unlockable from the layer list unless `lock` is denied. In a multi-selection, moving, aligning, duplicating, deleting and style changes apply to the members that allow them; a drag that starts on a fixed member only selects. Group resize and rotation handles appear only when every member allows that transform and moving. The panel disables denied controls with an explanation and the layer list marks restricted layers. A custom `renderTextInput` receives `readOnly`, `allowNewlines` and `allowFormatting`; edits that ignore them are rejected and the owned value is rendered again.
 
 ## Migrating from version 1
 
