@@ -25,6 +25,7 @@ const paths: Record<string, string> = {
   align_center: 'M4 5h16M7 10h10M4 15h16M7 20h10',
   align_right: 'M4 5h16M10 10h10M4 15h16M10 20h10',
   lock: 'M5 10h14v11H5ZM8 10V7a4 4 0 0 1 8 0v3',
+  rights: 'M12 3 5 6v5c0 4.4 3 8.3 7 10 4-1.7 7-5.6 7-10V6ZM9 12l2 2 4-4',
   unlock: 'M5 10h14v11H5ZM8 10V7a4 4 0 0 1 8 0',
   layers: 'm12 3 10 5-10 5L2 8Zm-10 9 10 5 10-5M2 17l10 5 10-5',
   export: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',

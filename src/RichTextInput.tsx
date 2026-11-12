@@ -45,6 +45,12 @@ export interface RichTextInputProps {
   style?: React.CSSProperties;
   ariaLabel: string;
   testId?: string;
+  /** Content cannot change; selection (and formatting, if allowed) still works. */
+  readOnly?: boolean;
+  /** When false, Enter inserts nothing and pasted line breaks become spaces. */
+  allowNewlines?: boolean;
+  /** When false, formatting shortcuts do nothing and pasted markup keeps the current style. */
+  allowFormatting?: boolean;
 }
 export interface RichTextRendererProps extends RichTextInputProps {
   editorRef: React.Ref<RichTextInputHandle>;
@@ -190,6 +196,15 @@ export const RichTextInput = forwardRef<
     publish(readRichText(root.current, true), selection, !composing.current);
   };
   const insert = (value: RichTextValue) => {
+    if (latest.current.readOnly) return;
+    if (latest.current.allowNewlines === false && value.text.includes('\n'))
+      value = {
+        text: value.text.replace(/\n/g, ' '),
+        runs: value.runs?.map((run) => ({
+          ...run,
+          text: run.text.replace(/\n/g, ' '),
+        })),
+      };
     const selection = root.current && domSelection(root.current);
     if (selection) range.current = selection;
     const start = Math.min(range.current.anchor, range.current.focus);
@@ -233,6 +248,7 @@ export const RichTextInput = forwardRef<
         range.current),
     }),
     applyFormat: (patch) => {
+      if (latest.current.allowFormatting === false) return;
       flush();
       if (range.current.anchor === range.current.focus) {
         const style = selectedTextStyle(
@@ -293,6 +309,10 @@ export const RichTextInput = forwardRef<
     const element = root.current;
     if (!element) return;
     const beforeInput = (event: InputEvent) => {
+      if (latest.current.readOnly) {
+        event.preventDefault();
+        return;
+      }
       if (event.isComposing || composing.current) return;
       if (
         event.inputType === 'historyUndo' ||
@@ -310,6 +330,7 @@ export const RichTextInput = forwardRef<
         event.preventDefault();
         const text =
           event.inputType === 'insertText' ? (event.data ?? '') : '\n';
+        if (text === '\n' && latest.current.allowNewlines === false) return;
         const selected = domSelection(element) ?? range.current;
         const marks =
           typing.current ??
@@ -334,10 +355,13 @@ export const RichTextInput = forwardRef<
   return (
     <div
       ref={root}
-      contentEditable
+      // A read-only box keeps focus and selection, but no IME or spellcheck can mutate it.
+      contentEditable={!props.readOnly}
+      tabIndex={props.readOnly ? 0 : undefined}
       suppressContentEditableWarning
       role="textbox"
-      aria-multiline="true"
+      aria-multiline={props.allowNewlines !== false}
+      aria-readonly={props.readOnly || undefined}
       aria-label={props.ariaLabel}
       data-testid={props.testId}
       className={props.className}
@@ -367,7 +391,10 @@ export const RichTextInput = forwardRef<
       onPaste={(event) => {
         event.preventDefault();
         event.stopPropagation();
-        const html = event.clipboardData.getData('text/html');
+        const html =
+          props.allowFormatting === false
+            ? ''
+            : event.clipboardData.getData('text/html');
         const plain = event.clipboardData
           .getData('text/plain')
           .replace(/\r\n?/g, '\n');
@@ -390,7 +417,10 @@ export const RichTextInput = forwardRef<
       onDrop={(event) => {
         event.preventDefault();
         event.stopPropagation();
-        const html = event.dataTransfer.getData('text/html'),
+        const html =
+            props.allowFormatting === false
+              ? ''
+              : event.dataTransfer.getData('text/html'),
           text = event.dataTransfer.getData('text/plain');
         if (html || text) insert(html ? htmlToRichText(html) : { text });
       }}
@@ -408,11 +438,27 @@ export const RichTextInput = forwardRef<
           props.onCommit?.();
           return;
         }
+        if (
+          event.key === 'Enter' &&
+          (props.readOnly || props.allowNewlines === false)
+        ) {
+          event.preventDefault();
+          return;
+        }
+        if (
+          props.readOnly &&
+          (event.key === 'Backspace' || event.key === 'Delete')
+        ) {
+          event.preventDefault();
+          return;
+        }
         if (event.metaKey || event.ctrlKey) {
           const key = event.key.toLowerCase();
           if (key === 'z' || key === 'y') {
             event.preventDefault();
             history(key === 'y' || event.shiftKey);
+          } else if (key === 'x' && props.readOnly) {
+            event.preventDefault();
           } else if (key === 'b' || key === 'i' || key === 'u') {
             event.preventDefault();
             const style =

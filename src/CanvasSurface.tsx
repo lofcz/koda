@@ -47,6 +47,7 @@ import {
   resizeTextBox,
   SnapGuide,
   snapMove,
+  selectedLayers,
   selectionFrame,
   snapPathPoint,
   transformLayers,
@@ -76,6 +77,12 @@ import {
   type RichTextRendererProps,
 } from './RichTextInput';
 import type { TextSelection, TextStyleState } from './richText';
+import {
+  allowsTextEdit,
+  groupTransformRights,
+  handleRights,
+  movableIds,
+} from './rights';
 import type { EditorTool } from './types';
 
 export interface SurfaceActions {
@@ -265,6 +272,8 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       [editingPath, setEditingPath] = useState<string | null>(null),
       [nodeIndex, setNodeIndex] = useState<number | null>(null);
     const pathDraftRef = useRef<PathDraft | null>(null);
+    const rightsOf = engine.rights,
+      selectable = (layer: Layer) => rightsOf(layer).select;
     const engineSelection = engine.getSnapshot().selectedIds;
     const selection = useMemo(
       () => selectedIds ?? engineSelection,
@@ -547,7 +556,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           !layer ||
           layer.kind !== 'path' ||
           !layer.pathEditable ||
-          layer.locked ||
+          !engine.rights(layer).pathPoints ||
           layer.hidden
         )
           return;
@@ -565,6 +574,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         !current ||
         !layer ||
         nodeIndex === null ||
+        !engine.rights(layer).pathPoints ||
         (layer.points?.length ?? 0) <= (layer.pathClosed ? 3 : 2)
       )
         return;
@@ -644,7 +654,16 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         finishText();
         const current = engine.getSnapshot().document,
           layer = current?.layers.find((item) => item.id === id);
-        if (!current || !layer || layer.kind !== 'text' || layer.locked) return;
+        const rights = layer && engine.rights(layer);
+        // Formatting a range needs the editor even when the content is fixed.
+        if (
+          !current ||
+          !layer ||
+          !rights ||
+          layer.kind !== 'text' ||
+          !(rights.editText || rights.style)
+        )
+          return;
         engine.select(id);
         engine.begin();
         editRef.current = id;
@@ -832,7 +851,15 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       if (tool === 'crop' && !compare) {
         ctx.save();
         ctx.transform(view.zoom, 0, 0, view.zoom, view.x, view.y);
-        paintCropPreview(ctx, doc, image, crop, engine.assets, cropOptions);
+        paintCropPreview(
+          ctx,
+          doc,
+          image,
+          crop,
+          engine.assets,
+          cropOptions,
+          rightsOf
+        );
         ctx.restore();
       } else
         paintDocument(
@@ -840,7 +867,8 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           displayDocument,
           image,
           [view.zoom, 0, 0, view.zoom, view.x, view.y],
-          engine.assets
+          engine.assets,
+          rightsOf
         );
     }, [
       doc,
@@ -853,6 +881,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       tool,
       crop,
       cropOptions,
+      rightsOf,
     ]);
 
     useLayoutEffect(() => {
@@ -1029,6 +1058,11 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         }
         const layer = group ?? doc.layers.find((item) => item.id === selected);
         if (layer && !layer.hidden) {
+          const allowed = handleRights(
+            layer,
+            group ? selectedLayers(doc, selection) : null,
+            rightsOf
+          );
           const corners = layerCorners(layer).map((p) => screen(p, view));
           ui.strokeStyle = accent;
           ui.lineWidth = 1.5;
@@ -1057,16 +1091,18 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             const ends = lineEndpoints(layer).map((p) => screen(p, view));
             path(ends, false);
             ui.stroke();
-            if (!layer.locked) ends.forEach((p) => handle(p, 6));
+            if (allowed.endpoint) ends.forEach((p) => handle(p, 6));
           } else {
             path(corners);
             ui.stroke();
-            if (!layer.locked) {
+            if (allowed.rotate) {
               const r = rotationHandle(corners),
                 top = midpoint(corners[0], corners[1]);
               path([top, r], false);
               ui.stroke();
               handle(r);
+            }
+            if (allowed.resize) {
               corners.forEach((p) => handle(p));
               if (layer.kind === 'text') {
                 handle(midpoint(corners[0], corners[3]), 5);
@@ -1168,6 +1204,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       pathHover,
       editingPath,
       nodeIndex,
+      rightsOf,
     ]);
 
     const position = (event: { clientX: number; clientY: number }): Point => {
@@ -1202,7 +1239,13 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           (item) => item.id === selected && !item.locked && !item.hidden
         );
       if (!layer || tool === 'draw' || editingPath === layer.id) return null;
+      const allowed = handleRights(
+        layer,
+        group ? selectedLayers(doc, selection) : null,
+        rightsOf
+      );
       if (layer.kind === 'line' || layer.kind === 'arrow') {
+        if (!allowed.endpoint) return null;
         const endpoint = lineEndpoints(layer).findIndex(
           (point) =>
             distance(screen(point, viewRef.current), p) <= (touch ? 22 : 11)
@@ -1220,9 +1263,11 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       const corners = layerCorners(layer).map((point) =>
           screen(point, viewRef.current)
         ),
-        corner = corners.findIndex(
-          (point) => distance(point, p) <= (touch ? 22 : 10)
-        );
+        corner = allowed.resize
+          ? corners.findIndex(
+              (point) => distance(point, p) <= (touch ? 22 : 10)
+            )
+          : -1;
       if (corner >= 0)
         return {
           layer,
@@ -1231,7 +1276,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           cursor: resizeCursor(corners, corner),
           ids: group ? selection : undefined,
         };
-      if (layer.kind === 'text') {
+      if (layer.kind === 'text' && allowed.resize) {
         const side = [
           midpoint(corners[0], corners[3]),
           midpoint(corners[1], corners[2]),
@@ -1245,7 +1290,10 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             ids: undefined,
           };
       }
-      if (distance(rotationHandle(corners), p) <= (touch ? 22 : 12))
+      if (
+        allowed.rotate &&
+        distance(rotationHandle(corners), p) <= (touch ? 22 : 12)
+      )
         return {
           layer,
           type: 'rotate' as const,
@@ -1260,7 +1308,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         (item) =>
           item.id === editingPath &&
           item.pathEditable &&
-          !item.locked &&
+          rightsOf(item).pathPoints &&
           !item.hidden
       );
       if (!layer) return null;
@@ -1476,9 +1524,10 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       const hit = hitDocument(
         doc,
         q,
-        (event.pointerType === 'touch' ? 10 : 5) / viewRef.current.zoom
+        (event.pointerType === 'touch' ? 10 : 5) / viewRef.current.zoom,
+        selectable
       );
-      if (hit && !hit.locked) {
+      if (hit) {
         let ids = selection;
         if (event.shiftKey) {
           engine.toggleSelection(hit.id);
@@ -1488,15 +1537,19 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           engine.select(hit.id);
           ids = [hit.id];
         }
-        const frame = ids.length > 1 ? selectionFrame(doc, ids) : null;
+        // A drag that starts on a fixed layer only selects. Otherwise members
+        // that cannot move stay put while the rest of the selection follows.
+        const movable = movableIds(selectedLayers(doc, ids), rightsOf);
+        if (!rightsOf(hit).move || !movable.length) return;
+        const frame = movable.length > 1 ? selectionFrame(doc, movable) : null;
         engine.begin();
         gesture.current = {
           type: 'move',
           base: doc,
-          layer: frame ?? hit,
+          layer: frame ?? doc.layers.find((item) => item.id === movable[0])!,
           start: q,
           corner: 0,
-          ids: frame ? ids : undefined,
+          ids: frame ? movable : undefined,
         };
         setCursor('move');
       } else if (tool === 'shapes' && shape === 'path' && inside(q)) {
@@ -1539,14 +1592,18 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           q.x <= group.matrix[4] + group.width &&
           q.y <= group.matrix[5] + group.height
         ) {
+          const movable = movableIds(selectedLayers(doc, selection), rightsOf);
+          if (!movable.length) return;
+          const frame =
+            movable.length > 1 ? selectionFrame(doc, movable) : null;
           engine.begin();
           gesture.current = {
             type: 'move',
             base: doc,
-            layer: group,
+            layer: frame ?? doc.layers.find((item) => item.id === movable[0])!,
             start: q,
             corner: 0,
-            ids: selection,
+            ids: frame ? movable : undefined,
           };
           setCursor('move');
         } else {
@@ -1598,12 +1655,12 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         else {
           const handle = selectedHandle(p),
             node = pathHandle(p),
-            hit = hitDocument(doc, q, 5 / viewRef.current.zoom);
+            hit = hitDocument(doc, q, 5 / viewRef.current.zoom, selectable);
           setHover(hit?.id ?? null);
           setCursor(
             (node ? (node.insert ? 'copy' : 'move') : handle?.cursor) ??
               (hit
-                ? hit.locked
+                ? !rightsOf(hit).move
                   ? 'default'
                   : 'move'
                 : tool === 'shapes' || tool === 'redact'
@@ -1808,7 +1865,8 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
                 delta,
                 5 / viewRef.current.zoom,
                 axis,
-                g.ids
+                g.ids,
+                (layer) => rightsOf(layer).snap
               )
             : { delta, guides: [] };
         delta = snapped.delta;
@@ -2050,23 +2108,33 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         return;
       }
       if (command && event.key.toLowerCase() === 'd' && layer) {
-        const copy = duplicateLayers(doc, selection);
-        engine.commit(copy.document);
-        engine.selectMany(copy.ids);
+        const copy = duplicateLayers(
+          doc,
+          selection,
+          (item) => rightsOf(item).duplicate
+        );
+        if (copy.ids.length) {
+          engine.commit(copy.document);
+          engine.selectMany(copy.ids);
+        }
         event.preventDefault();
         event.stopPropagation();
         return;
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
         if (editingPath && nodeIndex !== null) deletePathPoint();
-        else if (!layer?.locked) engine.removeSelected();
+        else engine.removeSelected();
         event.preventDefault();
         return;
       }
       if (event.key === '[' || event.key === ']') {
         const i = doc.layers.findIndex((item) => item.id === selected),
           direction = event.key === ']' ? 1 : -1;
-        if (command && i >= 0 && !layer?.locked) {
+        if (command && i >= 0 && layer) {
+          if (!rightsOf(layer).reorder) {
+            event.preventDefault();
+            return;
+          }
           const layers = [...doc.layers],
             target = event.shiftKey
               ? direction > 0
@@ -2104,6 +2172,22 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)
       ) {
         event.preventDefault();
+        const nudgeNode =
+            editingPath === layer.id &&
+            nodeIndex !== null &&
+            rightsOf(layer).pathPoints &&
+            !!layer.points?.[nodeIndex],
+          members = group ? selectedLayers(doc, selection) : [layer],
+          movable = movableIds(members, rightsOf);
+        if (
+          !nudgeNode &&
+          (event.altKey
+            ? !(group
+                ? groupTransformRights(members, rightsOf).rotate
+                : rightsOf(layer).rotate)
+            : !movable.length)
+        )
+          return;
         if (!keyboardTransaction.current) {
           engine.begin();
           keyboardTransaction.current = true;
@@ -2123,14 +2207,10 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
                 ? amount
                 : 0,
         };
-        if (
-          editingPath === layer.id &&
-          nodeIndex !== null &&
-          layer.points?.[nodeIndex]
-        ) {
-          const points = [...layer.points],
-            point = transform(layer.matrix, points[nodeIndex]);
-          points[nodeIndex] = transform(inverse(layer.matrix), {
+        if (nudgeNode) {
+          const points = [...layer.points!],
+            point = transform(layer.matrix, points[nodeIndex!]);
+          points[nodeIndex!] = transform(inverse(layer.matrix), {
             x: point.x + delta.x,
             y: point.y + delta.y,
           });
@@ -2151,7 +2231,9 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
                 inverse(group.matrix)
               )
             : translate(delta.x, delta.y);
-          engine.preview(transformLayers(doc, selection, matrix));
+          engine.preview(
+            transformLayers(doc, event.altKey ? selection : movable, matrix)
+          );
           return;
         }
         engine.preview(
@@ -2216,6 +2298,9 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
               : null;
           },
           defaults: resolveTextStyle(editingLayer),
+          readOnly: !rightsOf(editingLayer).editText,
+          allowNewlines: rightsOf(editingLayer).textNewlines,
+          allowFormatting: rightsOf(editingLayer).style,
           style: {
             position: 'absolute',
             zIndex: 5,
@@ -2261,6 +2346,11 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
               (item) => item.id === editRef.current
             );
             if (!current || !layer) return;
+            if (!allowsTextEdit(layer, value, engine.rights(layer))) {
+              // Re-render the owned value so the input drops the denied edit.
+              engine.preview(current);
+              return;
+            }
             engine.begin();
             engine.preview(
               updateLayer(
@@ -2406,7 +2496,8 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
               const layer = hitDocument(
                 doc,
                 imagePoint(position(event)),
-                5 / viewRef.current.zoom
+                5 / viewRef.current.zoom,
+                selectable
               );
               if (layer?.kind === 'text') beginText(layer.id);
               else if (layer?.kind === 'path' && layer.pathEditable)
