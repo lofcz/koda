@@ -108,11 +108,12 @@ export const RichTextInput = forwardRef<
   const range = useRef<TextSelection>({ anchor: 0, focus: 0 });
   const typing = useRef<TextStyle | null>(null),
     composing = useRef(false);
-  // Caret marks pending when an IME session starts; the session moves the DOM
-  // caret, so they must be captured before the composed text exists.
+  // The marks typed text would get, captured when an IME session starts: the
+  // session moves the DOM caret before the composed text exists.
   const composition = useRef<{
     text: string;
-    caret: number;
+    start: number;
+    end: number;
     marks: TextStyle;
   } | null>(null);
   const past = useRef<{ value: RichTextValue; selection: TextSelection }[]>([]);
@@ -366,13 +367,24 @@ export const RichTextInput = forwardRef<
       onInput={() => flush()}
       onCompositionStart={() => {
         composing.current = true;
-        composition.current = typing.current
-          ? {
-              text: current.current.text,
-              caret: Math.min(range.current.anchor, range.current.focus),
-              marks: typing.current,
-            }
-          : null;
+        const selected =
+          (root.current && domSelection(root.current)) ?? range.current;
+        composition.current = {
+          text: current.current.text,
+          start: Math.min(selected.anchor, selected.focus),
+          end: Math.max(selected.anchor, selected.focus),
+          marks:
+            typing.current ??
+            (Object.fromEntries(
+              Object.entries(
+                selectedTextStyle(
+                  current.current,
+                  selected,
+                  latest.current.defaults
+                )
+              ).filter(([, value]) => value !== null)
+            ) as TextStyle),
+        };
       }}
       onCompositionEnd={() => {
         composing.current = false;
@@ -380,21 +392,23 @@ export const RichTextInput = forwardRef<
         composition.current = null;
         flush();
         if (!pending) return;
-        // IME commits bypass beforeinput, so give the composed text the caret
-        // marks (e.g. Italic toggled with nothing selected) like typed text.
+        // IME commits bypass beforeinput. Give the composed text the marks
+        // typed text gets: pending caret marks (Italic toggled with nothing
+        // selected) or the style of the selection it replaced.
         const before = pending.text,
           after = current.current.text,
-          length = after.length - before.length;
+          length = after.length - before.length + pending.end - pending.start;
         if (
           length > 0 &&
-          after.startsWith(before.slice(0, pending.caret)) &&
-          after.endsWith(before.slice(pending.caret))
+          after.startsWith(before.slice(0, pending.start)) &&
+          after.endsWith(before.slice(pending.end))
         ) {
-          typing.current = pending.marks;
+          if (typing.current === null && pending.start === pending.end)
+            typing.current = pending.marks;
           publish(
             formatRichText(
               current.current,
-              { anchor: pending.caret, focus: pending.caret + length },
+              { anchor: pending.start, focus: pending.start + length },
               pending.marks
             ),
             range.current,
