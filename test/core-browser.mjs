@@ -495,6 +495,40 @@ try {
         pixel(canvas, 6, 16)[3] < pixel(canvas, 16, 16)[3],
       'Shape feather creates a soft transparent edge'
     );
+    // Effects run in row bands (idle warm-up, export); clarity's halo and the
+    // vignette's absolute rows must make that identical to one whole pass.
+    {
+      const tall = make(150, 333),
+        tallContext = tall.getContext('2d');
+      for (let y = 0; y < 333; y += 9)
+        for (let x = 0; x < 150; x += 7) {
+          tallContext.fillStyle = `hsl(${(x * 3 + y * 5) % 360},80%,${30 + ((x + y) % 40)}%)`;
+          tallContext.fillRect(x, y, 7, 9);
+        }
+      for (const effects of [
+        { ...model.DEFAULT_EFFECTS, clarity: 70, vignette: 60, brightness: 12 },
+        {
+          ...model.DEFAULT_EFFECTS,
+          preset: 'sepia',
+          clarity: -40,
+          vignette: -50,
+        },
+      ]) {
+        const banded = render
+            .exportCanvas({ ...model.createDocument(150, 333), effects }, tall)
+            .getContext('2d')
+            .getImageData(0, 0, 150, 333).data,
+          whole = tallContext.getImageData(0, 0, 150, 333);
+        render.filterPixels(whole.data, effects, 150, 333);
+        let differing = 0;
+        for (let i = 0; i < banded.length; i++)
+          if (banded[i] !== whole.data[i]) differing++;
+        check(
+          differing === 0,
+          `Banded effects equal one whole-image pass (${differing} bytes differ)`
+        );
+      }
+    }
     // Zoomed out, the preview composes at about display resolution. Effects,
     // feather, text shadow, erasing and redaction must match the full export
     // scaled to the same size.

@@ -563,6 +563,48 @@ export function filterPixels(
   width = data.length / 4,
   height = 1
 ) {
+  adjustPixels(data, effects, width, height, 0);
+  applyClarity(data, null, effects, width, height, 0, height);
+}
+
+/** Clarity radius for an image; banded filtering must use the whole image's. */
+function clarityRadius(width: number, height: number) {
+  return Math.max(1, Math.round(Math.min(width, height) / 180));
+}
+
+/** Local contrast for rows [from, to) of `data`. `source` (default: a copy of
+ * `data`) holds the adjusted pixels to blur, covering the same rows. */
+function applyClarity(
+  data: Uint8ClampedArray,
+  source: Uint8ClampedArray | null,
+  effects: ImageDocument['effects'],
+  width: number,
+  imageHeight: number,
+  from: number,
+  to: number,
+  radius = clarityRadius(width, imageHeight)
+) {
+  const clarity = (effects.clarity ?? 0) / 100;
+  if (!clarity || width <= 1 || imageHeight <= 1) return;
+  const blurred = source ?? data.slice();
+  blurPixels(blurred, width, blurred.length / 4 / width, radius);
+  const k = clarity * (clarity > 0 ? 1.5 : 1);
+  for (let i = from * width * 4; i < to * width * 4; i += 4) {
+    data[i] += (data[i] - blurred[i]) * k;
+    data[i + 1] += (data[i + 1] - blurred[i + 1]) * k;
+    data[i + 2] += (data[i + 2] - blurred[i + 2]) * k;
+  }
+}
+
+/** Per-pixel part of the effects for rows starting at `top` of an image
+ * `height` rows tall (vignette needs the absolute row). */
+function adjustPixels(
+  data: Uint8ClampedArray,
+  effects: ImageDocument['effects'],
+  width: number,
+  height: number,
+  top: number
+) {
   const contrast = Math.pow((100 + effects.contrast) / 100, 2),
     saturation = 1 + effects.saturation / 100,
     exposure = Math.pow(2, (effects.exposure ?? 0) / 50),
@@ -571,6 +613,68 @@ export function filterPixels(
     vignette = (effects.vignette ?? 0) / 100,
     lut = new Uint8ClampedArray(256);
   for (let i = 0; i < 256; i++) lut[i] = Math.pow(i / 255, gamma) * 255;
+  // Without saturation or a channel-mixing preset every channel maps on its
+  // own: precompute the value before vignette for each input byte.
+  if (
+    saturation === 1 &&
+    ['none', 'invert', 'warm', 'cool', 'fade'].includes(effects.preset)
+  ) {
+    const offset = 127.5 + effects.brightness * 2.55,
+      tables = [0, 1, 2].map((channel) => {
+        const table = new Float64Array(256);
+        for (let value = 0; value < 256; value++) {
+          let v = value;
+          if (effects.preset === 'invert') v = 255 - v;
+          if (effects.preset === 'warm')
+            v =
+              channel === 0
+                ? v * 1.07 + 7
+                : channel === 1
+                  ? v * 1.02 + 2
+                  : v * 0.91;
+          if (effects.preset === 'cool')
+            v =
+              channel === 0
+                ? v * 0.92
+                : channel === 1
+                  ? v * 1.01 + 2
+                  : v * 1.08 + 6;
+          if (effects.preset === 'fade')
+            v =
+              channel === 0
+                ? v * 0.8 + 33
+                : channel === 1
+                  ? v * 0.78 + 31
+                  : v * 0.77 + 36;
+          v =
+            (v * exposure - 127.5) * contrast +
+            offset +
+            (channel === 0 ? temperature : channel === 2 ? -temperature : 0);
+          table[value] = gamma === 1 ? v : lut[Math.round(clamp(v, 0, 255))];
+        }
+        return table;
+      });
+    const [red, green, blue] = tables;
+    if (!vignette) {
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = red[data[i]];
+        data[i + 1] = green[data[i + 1]];
+        data[i + 2] = blue[data[i + 2]];
+      }
+      return;
+    }
+    for (let i = 0; i < data.length; i += 4) {
+      const x = (((i / 4) % width) + 0.5 - width / 2) / (width / 2),
+        y = (Math.floor(i / 4 / width) + top + 0.5 - height / 2) / (height / 2),
+        amount = Math.abs(vignette) * Math.min(1, (x * x + y * y) / 2),
+        gain = 1 - amount,
+        lift = vignette < 0 ? 255 * amount : 0;
+      data[i] = red[data[i]] * gain + lift;
+      data[i + 1] = green[data[i + 1]] * gain + lift;
+      data[i + 2] = blue[data[i + 2]] * gain + lift;
+    }
+    return;
+  }
   for (let i = 0; i < data.length; i += 4) {
     let r = data[i],
       g = data[i + 1],
@@ -652,21 +756,19 @@ export function filterPixels(
       lift = 0;
     if (vignette) {
       const x = (((i / 4) % width) + 0.5 - width / 2) / (width / 2),
-        y = (Math.floor(i / 4 / width) + 0.5 - height / 2) / (height / 2);
+        y = (Math.floor(i / 4 / width) + top + 0.5 - height / 2) / (height / 2);
       const amount = Math.abs(vignette) * Math.min(1, (x * x + y * y) / 2);
       gain -= amount;
       if (vignette < 0) lift = 255 * amount;
     }
     const offset = 127.5 + effects.brightness * 2.55;
-    r =
-      ((l + (r - l) * saturation) * exposure - 127.5) * contrast +
-      offset +
-      temperature;
-    g = ((l + (g - l) * saturation) * exposure - 127.5) * contrast + offset;
-    b =
-      ((l + (b - l) * saturation) * exposure - 127.5) * contrast +
-      offset -
-      temperature;
+    // Neutral saturation keeps the channel exactly (l + (r - l) can be off
+    // by one ulp, which flips rounding at exact .5 ties).
+    const saturate = (value: number) =>
+      saturation === 1 ? value : l + (value - l) * saturation;
+    r = (saturate(r) * exposure - 127.5) * contrast + offset + temperature;
+    g = (saturate(g) * exposure - 127.5) * contrast + offset;
+    b = (saturate(b) * exposure - 127.5) * contrast + offset - temperature;
     data[i] =
       (gamma === 1 ? r : lut[Math.round(clamp(r, 0, 255))]) * gain + lift;
     data[i + 1] =
@@ -674,26 +776,10 @@ export function filterPixels(
     data[i + 2] =
       (gamma === 1 ? b : lut[Math.round(clamp(b, 0, 255))]) * gain + lift;
   }
-  const clarity = (effects.clarity ?? 0) / 100;
-  if (clarity && width > 1 && height > 1) {
-    const blurred = data.slice();
-    blurPixels(
-      blurred,
-      width,
-      height,
-      Math.max(1, Math.round(Math.min(width, height) / 180))
-    );
-    for (let i = 0; i < data.length; i += 4) {
-      for (let channel = 0; channel < 3; channel++)
-        data[i + channel] +=
-          (data[i + channel] - blurred[i + channel]) *
-          clarity *
-          (clarity > 0 ? 1.5 : 1);
-    }
-  }
 }
 
-/** Separable alpha-weighted box blur, linear in pixel count even at large radii. */
+/** Separable alpha-weighted box blur, linear in pixel count even at large radii.
+ * Sums are of integers, so the result is exact and independent of row order. */
 export function blurPixels(
   data: Uint8ClampedArray,
   width: number,
@@ -701,38 +787,51 @@ export function blurPixels(
   radius: number
 ) {
   const scratch = new Uint8ClampedArray(data.length),
-    r = Math.max(1, Math.round(radius));
+    r = Math.max(1, Math.round(radius)),
+    size = r * 2 + 1;
   const pass = (
     source: Uint8ClampedArray,
     target: Uint8ClampedArray,
     horizontal: boolean
   ) => {
     const rows = horizontal ? height : width,
-      length = horizontal ? width : height;
-    const index = (row: number, position: number) =>
-      (horizontal ? row * width + position : position * width + row) * 4;
+      length = horizontal ? width : height,
+      step = horizontal ? 4 : width * 4,
+      last = length - 1;
     for (let row = 0; row < rows; row++) {
+      const start = horizontal ? row * width * 4 : row * 4;
       let red = 0,
         green = 0,
         blue = 0,
         alpha = 0;
-      const add = (position: number, sign: number) => {
-        const i = index(row, clamp(position, 0, length - 1)),
-          a = source[i + 3] * sign;
+      for (let p = -r; p <= r; p++) {
+        const i = start + (p < 0 ? 0 : p > last ? last : p) * step,
+          a = source[i + 3];
         red += source[i] * a;
         green += source[i + 1] * a;
         blue += source[i + 2] * a;
         alpha += a;
-      };
-      for (let p = -r; p <= r; p++) add(p, 1);
+      }
       for (let p = 0; p < length; p++) {
-        const i = index(row, p);
+        const i = start + p * step;
         target[i] = alpha ? red / alpha : 0;
         target[i + 1] = alpha ? green / alpha : 0;
         target[i + 2] = alpha ? blue / alpha : 0;
-        target[i + 3] = alpha / (r * 2 + 1);
-        add(p - r, -1);
-        add(p + r + 1, 1);
+        target[i + 3] = alpha / size;
+        const out = p - r,
+          o = start + (out < 0 ? 0 : out > last ? last : out) * step,
+          ao = source[o + 3];
+        red -= source[o] * ao;
+        green -= source[o + 1] * ao;
+        blue -= source[o + 2] * ao;
+        alpha -= ao;
+        const next = p + r + 1,
+          n = start + (next < 0 ? 0 : next > last ? last : next) * step,
+          an = source[n + 3];
+        red += source[n] * an;
+        green += source[n + 1] * an;
+        blue += source[n + 2] * an;
+        alpha += an;
       }
     }
   };
@@ -789,14 +888,8 @@ function sourceDimensions(image: CanvasImageSource) {
   );
 }
 
-/** Filtered pixels for a source. `scale` < 1 filters a downsampled copy for the
- * on-screen view; callers draw the result at the source's natural size. */
-function filteredSource(
-  image: CanvasImageSource,
-  effects: ImageDocument['effects'],
-  scale = 1
-): CanvasImageSource {
-  if (
+function hasEffects(effects: ImageDocument['effects']) {
+  return !(
     effects.preset === 'none' &&
     !effects.brightness &&
     !effects.contrast &&
@@ -806,27 +899,156 @@ function filteredSource(
     !effects.temperature &&
     !effects.clarity &&
     !effects.vignette
-  )
-    return image;
+  );
+}
+
+/** Effects applied in row bands, so the work can be split across idle slices.
+ * Clarity reads a halo of `radius` rows around each band; the box blur sums
+ * integers, so banded output equals the whole-image result exactly. */
+type FilterJob = {
+  image: CanvasImageSource;
+  key: string;
+  effects: ImageDocument['effects'];
+  width: number;
+  height: number;
+  radius: number;
+  row: number;
+  /** Unfiltered pixels, CPU-backed for cheap reads. */
+  source?: CanvasRenderingContext2D;
+  target: HTMLCanvasElement;
+};
+const BAND_ROWS = 128;
+
+function startFilter(
+  image: CanvasImageSource,
+  effects: ImageDocument['effects'],
+  scale: number,
+  key: string,
+  target?: HTMLCanvasElement
+): FilterJob {
+  const size = sourceDimensions(image),
+    width = Math.max(1, Math.round(size.width * scale)),
+    height = Math.max(1, Math.round(size.height * scale)),
+    canvas = target ?? surface(width, height).canvas;
+  canvas.width = width;
+  canvas.height = height;
+  return {
+    image,
+    key,
+    effects,
+    width,
+    height,
+    radius: effects.clarity ? clarityRadius(width, height) : 0,
+    row: 0,
+    target: canvas,
+  };
+}
+
+/** Filter the next band; returns true when the image is complete. */
+function filterBand(job: FilterJob) {
+  if (!job.source) {
+    const canvas = document.createElement('canvas');
+    canvas.width = job.width;
+    canvas.height = job.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('Canvas2D is unavailable');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(job.image, 0, 0, job.width, job.height);
+    job.source = ctx;
+    return false;
+  }
+  const { width, height, radius, row } = job,
+    end = Math.min(height, row + BAND_ROWS),
+    top = Math.max(0, row - radius),
+    bottom = Math.min(height, end + radius),
+    data = job.source.getImageData(0, top, width, bottom - top).data;
+  adjustPixels(data, job.effects, width, height, top);
+  applyClarity(
+    data,
+    null,
+    job.effects,
+    width,
+    height,
+    row - top,
+    end - top,
+    radius || undefined
+  );
+  const band = new ImageData(width, end - row);
+  band.data.set(
+    data.subarray((row - top) * width * 4, (end - top) * width * 4)
+  );
+  job.target.getContext('2d')!.putImageData(band, 0, row);
+  job.row = end;
+  if (end < height) return false;
+  job.source = undefined;
+  return true;
+}
+
+/** One background job: the full-resolution filter that the next export needs.
+ * The on-screen view filters a reduced copy, so without this the first export
+ * after an effect change would pay for every source pixel at once. */
+let warming: FilterJob | null = null,
+  warmTimer: ReturnType<typeof setTimeout> | undefined;
+const idle =
+  typeof requestIdleCallback === 'function'
+    ? (run: (deadline: { timeRemaining(): number }) => void) =>
+        requestIdleCallback(run, { timeout: 200 })
+    : (run: (deadline: { timeRemaining(): number }) => void) => {
+        const started = performance.now();
+        setTimeout(() =>
+          run({ timeRemaining: () => 8 - (performance.now() - started) })
+        );
+      };
+function warmFullFilter(
+  image: CanvasImageSource,
+  effects: ImageDocument['effects']
+) {
+  const key = `1:${JSON.stringify(effects)}`;
+  if (filteredImages.get(image)?.key === key) return;
+  if (warming?.image === image && warming.key === key) return;
+  warming = null;
+  clearTimeout(warmTimer);
+  // Wait until the effect stops changing; a scrub repaints every frame.
+  warmTimer = setTimeout(() => {
+    const job = startFilter(image, effects, 1, key);
+    warming = job;
+    const step = (deadline: { timeRemaining(): number }) => {
+      if (warming !== job) return;
+      do {
+        if (filterBand(job)) {
+          warming = null;
+          filteredImages.set(image, { key, canvas: job.target });
+          return;
+        }
+      } while (deadline.timeRemaining() > 4);
+      idle(step);
+    };
+    idle(step);
+  }, 150);
+}
+
+/** Filtered pixels for a source. `scale` < 1 filters a downsampled copy for the
+ * on-screen view; callers draw the result at the source's natural size. */
+function filteredSource(
+  image: CanvasImageSource,
+  effects: ImageDocument['effects'],
+  scale = 1
+): CanvasImageSource {
+  if (!hasEffects(effects)) return image;
   const cache = scale < 1 ? viewFilteredImages : filteredImages,
     key = `${scale}:${JSON.stringify(effects)}`,
     cached = cache.get(image);
   if (cached?.key === key) return cached.canvas;
-  const size = sourceDimensions(image),
-    width = Math.max(1, Math.round(size.width * scale)),
-    height = Math.max(1, Math.round(size.height * scale)),
-    canvas = cached?.canvas ?? surface(width, height).canvas;
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d')!;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(image, 0, 0, width, height);
-  const pixels = ctx.getImageData(0, 0, width, height);
-  filterPixels(pixels.data, effects, width, height);
-  ctx.putImageData(pixels, 0, 0);
+  // Finish a matching background job instead of starting over.
+  let job: FilterJob;
+  if (scale === 1 && warming?.image === image && warming.key === key) {
+    job = warming;
+    warming = null;
+  } else job = startFilter(image, effects, scale, key, cached?.canvas);
+  while (!filterBand(job));
   // One filtered image per source, not one retained canvas per undo history entry.
-  cache.set(image, { key, canvas });
-  return canvas;
+  cache.set(image, { key, canvas: job.target });
+  return job.target;
 }
 
 function roundedRect(
@@ -1296,6 +1518,8 @@ export function paintDocument(
     filterScale = step(
       display * Math.sqrt(Math.abs(i[0] * i[3] - i[1] * i[2]))
     );
+  if (filterScale < 1 && hasEffects(doc.effects))
+    warmFullFilter(image, doc.effects);
   if (scale < 1 || filterScale < 1)
     ctx.drawImage(
       compose(
