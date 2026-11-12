@@ -108,6 +108,13 @@ export const RichTextInput = forwardRef<
   const range = useRef<TextSelection>({ anchor: 0, focus: 0 });
   const typing = useRef<TextStyle | null>(null),
     composing = useRef(false);
+  // Caret marks pending when an IME session starts; the session moves the DOM
+  // caret, so they must be captured before the composed text exists.
+  const composition = useRef<{
+    text: string;
+    caret: number;
+    marks: TextStyle;
+  } | null>(null);
   const past = useRef<{ value: RichTextValue; selection: TextSelection }[]>([]);
   const future = useRef<{ value: RichTextValue; selection: TextSelection }[]>(
     []
@@ -359,10 +366,42 @@ export const RichTextInput = forwardRef<
       onInput={() => flush()}
       onCompositionStart={() => {
         composing.current = true;
+        composition.current = typing.current
+          ? {
+              text: current.current.text,
+              caret: Math.min(range.current.anchor, range.current.focus),
+              marks: typing.current,
+            }
+          : null;
       }}
       onCompositionEnd={() => {
         composing.current = false;
+        const pending = composition.current;
+        composition.current = null;
         flush();
+        if (!pending) return;
+        // IME commits bypass beforeinput, so give the composed text the caret
+        // marks (e.g. Italic toggled with nothing selected) like typed text.
+        const before = pending.text,
+          after = current.current.text,
+          length = after.length - before.length;
+        if (
+          length > 0 &&
+          after.startsWith(before.slice(0, pending.caret)) &&
+          after.endsWith(before.slice(pending.caret))
+        ) {
+          typing.current = pending.marks;
+          publish(
+            formatRichText(
+              current.current,
+              { anchor: pending.caret, focus: pending.caret + length },
+              pending.marks
+            ),
+            range.current,
+            true,
+            false
+          );
+        }
       }}
       onPaste={(event) => {
         event.preventDefault();

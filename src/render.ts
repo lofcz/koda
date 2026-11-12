@@ -147,10 +147,7 @@ function redact(
   }
   const block = clamp(layer.redactionSize ?? 16, 1, 512),
     // Bound imported local coordinates without changing the transformed region.
-    factor = Math.min(
-      mode === 'pixelate' ? 1 / block : 1,
-      4096 / Math.max(layer.width, layer.height)
-    ),
+    factor = Math.min(1, 4096 / Math.max(layer.width, layer.height)),
     sample = surface(layer.width * factor, layer.height * factor),
     transform = ctx.getTransform().inverse();
   sample.ctx.scale(
@@ -182,6 +179,14 @@ function redact(
     );
     sample.ctx.putImageData(pixels, 0, 0);
   }
+  const cover =
+    mode === 'pixelate'
+      ? pixelateSample(
+          sample.ctx,
+          Math.max(1, Math.ceil(layer.width / block)),
+          Math.max(1, Math.ceil(layer.height / block))
+        )
+      : sample.canvas;
   ctx.beginPath();
   ctx.rect(0, 0, layer.width, layer.height);
   ctx.clip();
@@ -192,7 +197,177 @@ function redact(
   ctx.fillRect(0, 0, layer.width, layer.height);
   ctx.globalCompositeOperation = 'lighter';
   ctx.imageSmoothingEnabled = mode !== 'pixelate';
-  ctx.drawImage(sample.canvas, 0, 0, layer.width, layer.height);
+  ctx.drawImage(cover, 0, 0, layer.width, layer.height);
+}
+
+/** Alpha-weighted mean of every sampled pixel in each block. Browser downscaling
+ * filters differ (Firefox box-filters, Chromium samples bilinearly), which made
+ * edge blocks differ between the crop preview and export. */
+function pixelateSample(
+  sample: CanvasRenderingContext2D,
+  columns: number,
+  rows: number
+) {
+  const { width, height } = sample.canvas,
+    data = sample.getImageData(0, 0, width, height).data,
+    sums = new Float64Array(columns * rows * 5),
+    cellX = new Uint32Array(width);
+  for (let x = 0; x < width; x++)
+    cellX[x] = Math.min(columns - 1, Math.floor(((x + 0.5) * columns) / width));
+  for (let y = 0, i = 0; y < height; y++) {
+    const row =
+      Math.min(rows - 1, Math.floor(((y + 0.5) * rows) / height)) * columns;
+    for (let x = 0; x < width; x++, i += 4) {
+      const cell = (row + cellX[x]) * 5,
+        alpha = data[i + 3];
+      sums[cell] += data[i] * alpha;
+      sums[cell + 1] += data[i + 1] * alpha;
+      sums[cell + 2] += data[i + 2] * alpha;
+      sums[cell + 3] += alpha;
+      sums[cell + 4]++;
+    }
+  }
+  const cells = surface(columns, rows),
+    pixels = cells.ctx.createImageData(columns, rows);
+  for (let cell = 0; cell < columns * rows; cell++) {
+    const alpha = sums[cell * 5 + 3],
+      count = sums[cell * 5 + 4];
+    if (!alpha || !count) continue;
+    pixels.data[cell * 4] = sums[cell * 5] / alpha;
+    pixels.data[cell * 4 + 1] = sums[cell * 5 + 1] / alpha;
+    pixels.data[cell * 4 + 2] = sums[cell * 5 + 2] / alpha;
+    pixels.data[cell * 4 + 3] = alpha / count;
+  }
+  cells.ctx.putImageData(pixels, 0, 0);
+  return cells.canvas;
+}
+
+/** Canvas features that differ between engines, detected once by drawing. */
+let support: { filter: boolean; strokeShadow: boolean } | undefined;
+function canvasSupport() {
+  if (support) return support;
+  support = { filter: true, strokeShadow: true };
+  try {
+    const { ctx } = surface(32, 16);
+    // WebKit has no CanvasRenderingContext2D.filter.
+    support.filter = 'filter' in ctx;
+    // WebKit on Linux casts no shadow from strokeText.
+    ctx.font = '14px sans-serif';
+    ctx.lineWidth = 3;
+    ctx.shadowColor = '#ff0000';
+    ctx.shadowOffsetX = 14;
+    ctx.strokeText('H', 1, 13);
+    const data = ctx.getImageData(15, 0, 17, 16).data;
+    support.strokeShadow = false;
+    for (let i = 0; i < data.length; i += 4)
+      if (data[i] > 128 && data[i + 1] < 64 && data[i + 3] > 128) {
+        support.strokeShadow = true;
+        break;
+      }
+  } catch {
+    /* No Canvas2D (SSR, jsdom): nothing is painted, keep native paths. */
+  }
+  return support;
+}
+
+/** Device-pixel scratch canvas covering a local rect under the current transform. */
+function deviceScratch(
+  ctx: CanvasRenderingContext2D,
+  local: Rect,
+  devicePad: number
+) {
+  const t = ctx.getTransform(),
+    xs: number[] = [],
+    ys: number[] = [];
+  for (const [x, y] of [
+    [local.x, local.y],
+    [local.x + local.width, local.y],
+    [local.x, local.y + local.height],
+    [local.x + local.width, local.y + local.height],
+  ]) {
+    xs.push(t.a * x + t.c * y + t.e);
+    ys.push(t.b * x + t.d * y + t.f);
+  }
+  const left = Math.max(0, Math.floor(Math.min(...xs) - devicePad)),
+    top = Math.max(0, Math.floor(Math.min(...ys) - devicePad)),
+    right = Math.min(ctx.canvas.width, Math.ceil(Math.max(...xs) + devicePad)),
+    bottom = Math.min(
+      ctx.canvas.height,
+      Math.ceil(Math.max(...ys) + devicePad)
+    );
+  if (right <= left || bottom <= top) return null;
+  const scratch = surface(right - left, bottom - top);
+  scratch.ctx.setTransform(t.a, t.b, t.c, t.d, t.e - left, t.f - top);
+  return { ...scratch, left, top };
+}
+
+/** ctx.filter blur fallback: Gaussian sigma in device pixels, approximated by
+ * three box passes, painted with the layer's opacity and erase mode. */
+function paintFeathered(
+  ctx: CanvasRenderingContext2D,
+  layer: Layer,
+  assets: ImageAssets
+) {
+  const sigma = layer.feather ?? 0,
+    points = layer.kind === 'path' ? (layer.points ?? []) : [],
+    xs = points.length ? points.map((p) => p.x) : [0, layer.width],
+    ys = points.length ? points.map((p) => p.y) : [0, layer.height],
+    stroke =
+      layer.strokeWidth / 2 +
+      (layer.kind === 'line' || layer.kind === 'arrow'
+        ? Math.max(12, layer.strokeWidth * 4)
+        : 0) +
+      (layer.textOutline?.width ?? 0) * 2 +
+      Math.abs(layer.textShadow?.offsetX ?? 0) +
+      Math.abs(layer.textShadow?.offsetY ?? 0) +
+      (layer.textShadow?.blur ?? 0) +
+      1;
+  const view = ctx.getTransform();
+  ctx.save();
+  apply(ctx, layer.matrix);
+  const scratch = deviceScratch(
+    ctx,
+    {
+      x: Math.min(...xs) - stroke,
+      y: Math.min(...ys) - stroke,
+      width: Math.max(...xs) - Math.min(...xs) + stroke * 2,
+      height: Math.max(...ys) - Math.min(...ys) + stroke * 2,
+    },
+    Math.ceil(sigma * 3) + 1
+  );
+  ctx.restore();
+  if (!scratch) return;
+  // renderLayer adds the layer matrix to the caller's view.
+  scratch.ctx.setTransform(
+    view.a,
+    view.b,
+    view.c,
+    view.d,
+    view.e - scratch.left,
+    view.f - scratch.top
+  );
+  renderLayer(
+    scratch.ctx,
+    { ...layer, feather: 0, opacity: 1, erase: false },
+    assets
+  );
+  const { width, height } = scratch.canvas,
+    pixels = scratch.ctx.getImageData(0, 0, width, height),
+    radius = Math.max(
+      1,
+      Math.round((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2)
+    );
+  for (let pass = 0; pass < 3; pass++)
+    blurPixels(pixels.data, width, height, radius);
+  scratch.ctx.putImageData(pixels, 0, 0);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = layer.opacity;
+  ctx.globalCompositeOperation = layer.erase
+    ? 'destination-out'
+    : 'source-over';
+  ctx.drawImage(scratch.canvas, scratch.left, scratch.top);
+  ctx.restore();
 }
 
 export function renderLayer(
@@ -202,6 +377,8 @@ export function renderLayer(
   backdrop?: CanvasImageSource
 ) {
   if (layer.hidden || layer.opacity <= 0) return;
+  if (layer.feather && layer.kind !== 'redaction' && !canvasSupport().filter)
+    return paintFeathered(ctx, layer, assets);
   ctx.save();
   apply(ctx, layer.matrix);
   ctx.globalAlpha = layer.opacity;
@@ -261,7 +438,32 @@ export function renderLayer(
         if (layer.textOutline?.width) {
           ctx.lineWidth = layer.textOutline.width * 2;
           ctx.strokeStyle = layer.textOutline.color;
-          paintText(ctx, text, x, baseline, style, true);
+          if (shadow && !canvasSupport().strokeShadow) {
+            // Stroke into a device-aligned bitmap; drawImage casts the shadow.
+            const scratch = deviceScratch(
+              ctx,
+              {
+                x: x - ctx.lineWidth,
+                y: line.y - ctx.lineWidth,
+                width: span.width + ctx.lineWidth * 2,
+                height: line.height + ctx.lineWidth * 2,
+              },
+              2
+            );
+            if (scratch) {
+              setTextFont(scratch.ctx, style);
+              scratch.ctx.lineWidth = ctx.lineWidth;
+              scratch.ctx.lineJoin = ctx.lineJoin;
+              scratch.ctx.lineCap = ctx.lineCap;
+              scratch.ctx.strokeStyle = ctx.strokeStyle;
+              scratch.ctx.textBaseline = 'alphabetic';
+              paintText(scratch.ctx, text, x, baseline, style, true);
+              ctx.save();
+              ctx.setTransform(1, 0, 0, 1, 0, 0);
+              ctx.drawImage(scratch.canvas, scratch.left, scratch.top);
+              ctx.restore();
+            }
+          } else paintText(ctx, text, x, baseline, style, true);
           ctx.shadowColor = 'transparent';
         }
         paintText(ctx, text, x, baseline, style);
@@ -536,6 +738,10 @@ const filteredImages = new WeakMap<
   object,
   { key: string; canvas: HTMLCanvasElement }
 >();
+const viewFilteredImages = new WeakMap<
+  object,
+  { key: string; canvas: HTMLCanvasElement }
+>();
 type Composition = {
   doc: ImageDocument;
   assets: ImageAssets;
@@ -543,8 +749,10 @@ type Composition = {
   base?: HTMLCanvasElement;
   mask?: HTMLCanvasElement;
   decoration?: CompositionDecoration;
+  filterScale?: number;
 };
 const compositions = new WeakMap<object, Composition>();
+const viewCompositions = new WeakMap<object, Composition>();
 const cropOverflows = new WeakMap<object, Composition>();
 const cropSelections = new WeakMap<object, Composition>();
 
@@ -573,9 +781,12 @@ function sourceDimensions(image: CanvasImageSource) {
   );
 }
 
+/** Filtered pixels for a source. `scale` < 1 filters a downsampled copy for the
+ * on-screen view; callers draw the result at the source's natural size. */
 function filteredSource(
   image: CanvasImageSource,
-  effects: ImageDocument['effects']
+  effects: ImageDocument['effects'],
+  scale = 1
 ): CanvasImageSource {
   if (
     effects.preset === 'none' &&
@@ -589,20 +800,24 @@ function filteredSource(
     !effects.vignette
   )
     return image;
-  const key = JSON.stringify(effects),
-    cached = filteredImages.get(image);
+  const cache = scale < 1 ? viewFilteredImages : filteredImages,
+    key = `${scale}:${JSON.stringify(effects)}`,
+    cached = cache.get(image);
   if (cached?.key === key) return cached.canvas;
   const size = sourceDimensions(image),
-    canvas = cached?.canvas ?? surface(size.width, size.height).canvas;
-  canvas.width = size.width;
-  canvas.height = size.height;
+    width = Math.max(1, Math.round(size.width * scale)),
+    height = Math.max(1, Math.round(size.height * scale)),
+    canvas = cached?.canvas ?? surface(width, height).canvas;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext('2d')!;
-  ctx.drawImage(image, 0, 0, size.width, size.height);
-  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  filterPixels(pixels.data, effects, canvas.width, canvas.height);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(image, 0, 0, width, height);
+  const pixels = ctx.getImageData(0, 0, width, height);
+  filterPixels(pixels.data, effects, width, height);
   ctx.putImageData(pixels, 0, 0);
   // One filtered image per source, not one retained canvas per undo history entry.
-  filteredImages.set(image, { key, canvas });
+  cache.set(image, { key, canvas });
   return canvas;
 }
 
@@ -743,13 +958,15 @@ function compose(
   image: CanvasImageSource,
   assets: ImageAssets,
   decoration?: CompositionDecoration,
-  cache = compositions
+  cache = compositions,
+  filterScale = 1
 ) {
   const cached = cache.get(image);
   if (
     cached?.doc === doc &&
     cached.assets === assets &&
-    cached.decoration === decoration
+    cached.decoration === decoration &&
+    cached.filterScale === filterScale
   )
     return cached.canvas;
   const canvas = cached?.canvas ?? surface(doc.width, doc.height).canvas;
@@ -782,7 +999,14 @@ function compose(
   }
   ctx.save();
   apply(ctx, doc.imageMatrix);
-  ctx.drawImage(filteredSource(image, doc.effects), 0, 0);
+  const natural = sourceDimensions(image);
+  ctx.drawImage(
+    filteredSource(image, doc.effects, filterScale),
+    0,
+    0,
+    natural.width,
+    natural.height
+  );
   ctx.restore();
   let base = cached?.base,
     mask = cached?.mask;
@@ -822,7 +1046,15 @@ function compose(
   paintFrame(ctx, frameDoc);
   ctx.restore();
   ctx.restore();
-  cache.set(image, { doc, assets, canvas, base, mask, decoration });
+  cache.set(image, {
+    doc,
+    assets,
+    canvas,
+    base,
+    mask,
+    decoration,
+    filterScale,
+  });
   return canvas;
 }
 
@@ -980,6 +1212,9 @@ export function exportCanvas(
       source = step.canvas;
       rect = { x: 0, y: 0, width: source.width, height: source.height };
     }
+  } else if (rect.width > canvas.width || rect.height > canvas.height) {
+    pixelatedDownscale(ctx, source, rect);
+    return canvas;
   }
   ctx.drawImage(
     source,
@@ -993,6 +1228,37 @@ export function exportCanvas(
     canvas.height
   );
   return canvas;
+}
+/** Nearest-neighbour downscale built only from unscaled copies. Firefox filters
+ * every downscaling drawImage even with imageSmoothingEnabled = false, which
+ * would blend source pixels; one-pixel strips copied at 1:1 cannot blend. */
+function pixelatedDownscale(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLCanvasElement,
+  rect: Rect
+) {
+  const { width, height } = ctx.canvas,
+    top = clamp(Math.floor(rect.y), 0, source.height - 1),
+    rows = clamp(Math.ceil(rect.y + rect.height) - top, 1, source.height - top),
+    columns = surface(width, rows),
+    sampleX = (x: number) =>
+      clamp(
+        Math.floor(rect.x + ((x + 0.5) * rect.width) / width),
+        0,
+        source.width - 1
+      ),
+    sampleY = (y: number) =>
+      clamp(
+        Math.floor(rect.y + ((y + 0.5) * rect.height) / height) - top,
+        0,
+        rows - 1
+      );
+  columns.ctx.imageSmoothingEnabled = false;
+  for (let x = 0; x < width; x++)
+    columns.ctx.drawImage(source, sampleX(x), top, 1, rows, x, 0, 1, rows);
+  ctx.imageSmoothingEnabled = false;
+  for (let y = 0; y < height; y++)
+    ctx.drawImage(columns.canvas, 0, sampleY(y), width, 1, 0, y, width, 1);
 }
 export function textSize(
   text: string,
