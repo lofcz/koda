@@ -2604,7 +2604,7 @@ export function EditorUI({
     controls = (
       <>
         <div
-          className="rie-segmented"
+          className="rie-segmented rie-draw-modes"
           role="group"
           aria-label={t('tools.draw')}
         >

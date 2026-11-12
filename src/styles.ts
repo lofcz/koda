@@ -246,8 +246,10 @@ export const styles = `
 .image-editor-root .rie-swatch:hover:not(:disabled){transform:scale(1.1)}
 .image-editor-root .rie-swatch:active:not(:disabled){transform:scale(.94)}
 .image-editor-root input[type="color"]{border:0;box-shadow:inset 0 0 0 1px rgb(16 24 40/.12)}
-.image-editor-root .rie-segmented{background:var(--rie-muted);border-color:transparent;padding:3px;border-radius:10px;gap:3px}
-.image-editor-root .rie-segmented button{min-height:32px;border-radius:7px;font-size:11.5px;gap:5px;color:var(--rie-secondary)}
+.image-editor-root .rie-options .rie-segmented{background:var(--rie-muted);border-color:transparent;padding:3px;border-radius:10px;gap:3px}
+.image-editor-root .rie-options .rie-draw-modes button{flex-direction:column;min-height:48px;gap:3px;padding:5px 2px;font-size:11px}
+.image-editor-root[data-scheme="dark"] .rie-swatch,.image-editor-root[data-scheme="dark"] input[type="color"]{box-shadow:inset 0 0 0 1px rgb(255 255 255/.2)}
+.image-editor-root .rie-options .rie-segmented button{min-height:32px;border-radius:7px;font-size:11.5px;gap:5px;color:var(--rie-secondary)}
 .image-editor-root .rie-segmented button svg{width:16px;height:16px}
 .image-editor-root .rie-segmented button:hover:not(:disabled){background:var(--rie-hover)}
 .image-editor-root .rie-segmented button[aria-pressed="true"],.image-editor-root .rie-segmented button[aria-pressed="true"]:hover:not(:disabled){background:var(--rie-panel);color:var(--rie-fg);box-shadow:0 1px 2px rgb(16 24 40/.12),0 0 0 1px rgb(16 24 40/.04)}
@@ -305,6 +307,7 @@ export const styles = `
  .image-editor-root .rie-nav button{flex:1 0 58px;min-height:48px;padding:5px 4px;gap:4px;font-size:10px;border-radius:8px}
  .image-editor-root .rie-body .rie-canvas-wrap{order:0;min-height:100px}
  .image-editor-root .rie-options{animation-name:rie-drop-up}
+ .image-editor-root .rie-options .rie-draw-modes button{flex-direction:row;min-height:34px;gap:5px}
  .image-editor-root .rie-body .rie-options{order:1;width:100%;max-width:100%;max-height:var(--rie-options-max-height,170px);border:0;border-top:1px solid var(--rie-line)}
  .image-editor-root .rie-options-heading{padding:3px 8px 2px 12px;min-height:33px}
  .image-editor-root .rie-options-heading h2{font-size:12px}
