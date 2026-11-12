@@ -398,8 +398,9 @@ try {
   next = await doc();
   // Apply rounds the crop to whole output pixels and scales the source with
   // it. Firefox reports integer pointer coordinates, so its dragged width can
-  // be fractional; Chromium's exact -100 px drag keeps the scale at 1.
-  close(next.imageMatrix[4], (90 * next.width) / region.width);
+  // be fractional; Chromium's exact -100 px drag keeps the scale at 1. The
+  // width is read back from CSS, so allow the same 0.001 as the region checks.
+  close(next.imageMatrix[4], (90 * next.width) / region.width, 0.001);
   assert(next.imageMatrix[5] > 0);
 
   // Touch promotion and demotion preserve one pending crop and roll back the whole gesture.
