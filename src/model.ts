@@ -968,24 +968,44 @@ function equalValue(a: unknown, b: unknown): boolean {
   );
 }
 
-/** One pointer gesture is one history entry, regardless of pointer sample count. */
-export class DocumentHistory {
-  past: ImageDocument[] = [];
-  future: ImageDocument[] = [];
-  private transaction: ImageDocument | null = null;
+type HistoryEntry<S> = { document: ImageDocument; source: S };
+/** One pointer gesture is one history entry, regardless of pointer sample count.
+ * Every entry also owns an opaque source reference, so an undo step can restore
+ * replaced source pixels together with the document drawn over them. Dropped
+ * entries release their references. */
+export class DocumentHistory<S = undefined> {
+  private pastEntries: HistoryEntry<S>[] = [];
+  private futureEntries: HistoryEntry<S>[] = [];
+  private transaction: HistoryEntry<S> | null = null;
   private _baseline: ImageDocument;
+  readonly baselineSource: S;
   get baseline() {
     return this._baseline;
   }
   constructor(
     public current: ImageDocument,
-    private limit = 100
+    private limit = 100,
+    public source: S = undefined as S
   ) {
     this._baseline = current;
+    this.baselineSource = source;
+  }
+  get past(): readonly ImageDocument[] {
+    return this.pastEntries.map((entry) => entry.document);
+  }
+  get future(): readonly ImageDocument[] {
+    return this.futureEntries.map((entry) => entry.document);
+  }
+  get canUndo() {
+    return this.pastEntries.length > 0;
+  }
+  get canRedo() {
+    return this.futureEntries.length > 0;
   }
   /**
    * Apply a policy change to every snapshot, so undo and redo can never restore
    * what the policy replaced. Shared snapshots stay shared, preserving `changed`.
+   * Sources are untouched: policies own document data only.
    */
   rewrite(map: (doc: ImageDocument) => ImageDocument) {
     const cache = new Map<ImageDocument, ImageDocument>();
@@ -994,20 +1014,27 @@ export class DocumentHistory {
       if (!next) cache.set(doc, (next = map(doc)));
       return next;
     };
-    this.past = this.past.map(apply);
-    this.future = this.future.map(apply);
+    const entry = (value: HistoryEntry<S>) => ({
+      document: apply(value.document),
+      source: value.source,
+    });
+    this.pastEntries = this.pastEntries.map(entry);
+    this.futureEntries = this.futureEntries.map(entry);
     this.current = apply(this.current);
     this._baseline = apply(this._baseline);
-    if (this.transaction) this.transaction = apply(this.transaction);
+    if (this.transaction) this.transaction = entry(this.transaction);
   }
   get changed() {
-    return this.current !== this.baseline;
+    return (
+      this.current !== this._baseline || this.source !== this.baselineSource
+    );
   }
   get inTransaction() {
     return this.transaction !== null;
   }
   begin() {
-    if (!this.transaction) this.transaction = this.current;
+    if (!this.transaction)
+      this.transaction = { document: this.current, source: this.source };
   }
   preview(next: ImageDocument) {
     this.current = next;
@@ -1017,37 +1044,48 @@ export class DocumentHistory {
     if (this.current === this._baseline) this._baseline = next;
     this.current = next;
   }
-  commit(next = this.current) {
-    const before = this.transaction ?? this.current;
+  /** A different source is always a change, even over an identical document. */
+  commit(next = this.current, source = this.source) {
+    const before = this.transaction ?? {
+      document: this.current,
+      source: this.source,
+    };
     this.transaction = null;
-    if (equalValue(before, next)) {
-      this.current = before;
+    if (source === before.source && equalValue(before.document, next)) {
+      this.current = before.document;
+      this.source = before.source;
       return false;
     }
-    this.past.push(before);
-    if (this.past.length > this.limit) this.past.shift();
-    this.future = [];
+    this.pastEntries.push(before);
+    if (this.pastEntries.length > this.limit) this.pastEntries.shift();
+    this.futureEntries = [];
     this.current = next;
+    this.source = source;
     return true;
   }
   cancel() {
-    if (this.transaction) this.current = this.transaction;
+    if (this.transaction) {
+      this.current = this.transaction.document;
+      this.source = this.transaction.source;
+    }
     this.transaction = null;
   }
   undo() {
     this.cancel();
-    const before = this.past.pop();
+    const before = this.pastEntries.pop();
     if (before) {
-      this.future.push(this.current);
-      this.current = before;
+      this.futureEntries.push({ document: this.current, source: this.source });
+      this.current = before.document;
+      this.source = before.source;
     }
   }
   redo() {
     this.cancel();
-    const next = this.future.pop();
+    const next = this.futureEntries.pop();
     if (next) {
-      this.past.push(this.current);
-      this.current = next;
+      this.pastEntries.push({ document: this.current, source: this.source });
+      this.current = next.document;
+      this.source = next.source;
     }
   }
 }

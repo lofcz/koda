@@ -80,24 +80,41 @@ Each pointer gesture and text editing transaction is one undo step. History reta
 
 `ref.current.editor` is null before initialization and after destruction.
 
-| Method                                     | Contract                                                                                                                      |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `getImage(options?): string \| null`       | Current image data URL, or null while not ready. Applies pending crop and text edits first. Defaults to PNG.                  |
-| `getBlob(options?): Promise<Blob>`         | The same export as a Blob; rejects while not ready. Waits for catalog fonts the document uses (see `fontLoadTimeout`).        |
-| `fontsReady(timeout?)`                     | Resolves `{ loaded, failed }` catalog font ids; failed includes timeouts. `getImage()` is synchronous; await this first.      |
-| `getDocument(): ImageDocument \| null`     | Independent JSON-safe editable state, including embedded sticker images. Flushes pending edits.                               |
-| `restoreDocument(document): Promise<void>` | Validate and restore a document or serialized JSON against the currently loaded original source.                              |
-| `addImage(url): Promise<void>`             | Load and embed an image as a new editable layer.                                                                              |
-| `getLayerRights(id)`                       | Effective rights of a layer after editor defaults and `locked`, or null when the layer does not exist.                        |
-| `setLayerRights(id, rights \| null)`       | Replace one layer's own rights. Also rewrites undo/redo history, so undo never restores earlier rights.                       |
-| `getSource(): CanvasImageSource \| null`   | Original source pixels for comparison or custom previews.                                                                     |
-| `getSourceBlob(): Promise<Blob>`           | Original encoded source bytes, retained from the successful load; rejects while not ready.                                    |
-| `getExportOptions(): ImageExportOptions`   | Independent copy of the current output settings for persistence.                                                              |
-| `revert()`                                 | Return to the loaded baseline as a single undoable edit.                                                                      |
-| `hasChanges(): boolean`                    | Whether the document differs from its loaded baseline. Saving does not mark it clean; reset to the saved source when desired. |
-| `reset(imageUrl?): Promise<void>`          | Load a new baseline, clearing selection and history after success. Without a URL, reload the last successful source.          |
-| `updateOptions(options)`                   | Update presentation without losing the document, selection or history. An `image` value requests a source replacement.        |
-| `destroy()`                                | Cancel pending loading and release the document. Normally called by React cleanup.                                            |
+| Method                                     | Contract                                                                                                                                                  |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getImage(options?): string \| null`       | Current image data URL, or null while not ready. Applies pending crop and text edits first. Defaults to PNG.                                              |
+| `getBlob(options?): Promise<Blob>`         | The same export as a Blob; rejects while not ready. Waits for catalog fonts the document uses (see `fontLoadTimeout`).                                    |
+| `fontsReady(timeout?)`                     | Resolves `{ loaded, failed }` catalog font ids; failed includes timeouts. `getImage()` is synchronous; await this first.                                  |
+| `getDocument(): ImageDocument \| null`     | Independent JSON-safe editable state, including embedded sticker images. Flushes pending edits.                                                           |
+| `restoreDocument(document): Promise<void>` | Validate and restore a document or serialized JSON against the currently loaded original source.                                                          |
+| `addImage(url): Promise<void>`             | Load and embed an image as a new editable layer.                                                                                                          |
+| `getLayerRights(id)`                       | Effective rights of a layer after editor defaults and `locked`, or null when the layer does not exist.                                                    |
+| `setLayerRights(id, rights \| null)`       | Replace one layer's own rights. Also rewrites undo/redo history, so undo never restores earlier rights.                                                   |
+| `getSource(): CanvasImageSource \| null`   | Original source pixels for comparison or custom previews.                                                                                                 |
+| `getSourceBlob(): Promise<Blob>`           | Original encoded source bytes, retained from the successful load; rejects while not ready.                                                                |
+| `getExportOptions(): ImageExportOptions`   | Independent copy of the current output settings for persistence.                                                                                          |
+| `revert()`                                 | Return to the loaded baseline as a single undoable edit.                                                                                                  |
+| `hasChanges(): boolean`                    | Whether the document differs from its loaded baseline. Saving does not mark it clean; reset to the saved source when desired.                             |
+| `reset(imageUrl?): Promise<void>`          | Load a new baseline, clearing selection and history after success. Without a URL, reload the last successful source.                                      |
+| `updateOptions(options)`                   | Update presentation without losing the document, selection or history. An `image` value requests a source replacement.                                    |
+| `destroy()`                                | Cancel pending loading and release the document. Normally called by React cleanup.                                                                        |
+| Method                                     | Contract                                                                                                                                                  |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getImage(options?): string \| null`       | Current image data URL, or null while not ready. Applies pending crop and text edits first. Defaults to PNG.                                              |
+| `getBlob(options?): Promise<Blob>`         | The same export as a Blob; rejects while not ready.                                                                                                       |
+| `getBaseImage(options?): string \| null`   | The photo at document size with its crop, rotation, resize and adjustments, without layers, frame, background or corners. Visible redactions are applied. |
+| `replaceBase(image): Promise<void>`        | Replace the base pixels (a URL or loaded image) as one undoable edit. Layers stay editable; undo restores the previous source.                            |
+| `getDocument(): ImageDocument \| null`     | Independent JSON-safe editable state, including embedded sticker images. Flushes pending edits.                                                           |
+| `restoreDocument(document): Promise<void>` | Validate and restore a document or serialized JSON against the current source.                                                                            |
+| `addImage(url): Promise<void>`             | Load and embed an image as a new editable layer.                                                                                                          |
+| `getSource(): CanvasImageSource \| null`   | Current source pixels (the loaded image or the latest `replaceBase` image) for comparison or custom previews.                                             |
+| `getSourceBlob(): Promise<Blob>`           | Current encoded source bytes, retained from the successful load; rejects while not ready.                                                                 |
+| `getExportOptions(): ImageExportOptions`   | Independent copy of the current output settings for persistence.                                                                                          |
+| `revert()`                                 | Return to the loaded baseline document and source as a single undoable edit.                                                                              |
+| `hasChanges(): boolean`                    | Whether the document differs from its loaded baseline. Saving does not mark it clean; reset to the saved source when desired.                             |
+| `reset(imageUrl?): Promise<void>`          | Load a new baseline, clearing selection and history after success. Without a URL, reload the last successful source.                                      |
+| `updateOptions(options)`                   | Update presentation without losing the document, selection or history. An `image` value requests a source replacement.                                    |
+| `destroy()`                                | Cancel pending loading and release the document. Normally called by React cleanup.                                                                        |
 
 The latest requested image wins. Superseded requests reject with `AbortError`; late completion cannot restore a destroyed editor. A failed replacement rejects while preserving the previous document, history and pending crop. A successful replacement discards old pending controls before any immediate export. Initial failures have a retry surface; replacement failures leave the previous editor usable with an error message.
 
@@ -249,7 +266,7 @@ The fork retains the React component, ref methods, callbacks, layout hooks and t
 
 Hosted AI assistants, custom tool icons and remote font catalogs are not included. Stickers, frames, rounded corners, filters and annotations use this package's own implementation. `projectId`, `user`, `env`, `offline`, `licenseUrl`, `defaultPrompt`, `autoSubmitPrompt`, `aiAssistantOpenState`, `features.ai` and `scriptUrl` remain accepted as deprecated compatibility fields and have no effect. Tool flags are booleans. The old `features.imageEditor: false` shorthand is not supported. Built-in locales are now cs/sk/en/pl; provide translation overrides for other languages.
 
-Hosts own AI generation, inpainting, background removal, masks, sharing and persistence. Export the current image through the public ref, call your backend, then `await editor.reset(resultUrl)` to preview its result. Save it only when the user accepts the edit. No hosted engine code or assets have been copied into this package.
+Hosts own AI generation, inpainting, background removal, masks, sharing and persistence. Send `getBaseImage()` to your backend (a mask drawn in document coordinates lines up with it; visible redactions are applied so hidden content never leaves the editor), then `await editor.replaceBase(resultUrl)`. The result fills the document as the new source: an aspect difference up to 1.5% (an image model rounding to its supported size) is stretched, keeping masks and layers exactly aligned; a larger difference is centered and cover-fitted with its proportions kept, and the overflow stays in the source for a later crop; geometry and adjustments already baked into it are reset, while text, drawings, stickers, frame and background stay editable on top. It is one history step: undo restores the previous source pixels, geometry and adjustments exactly, and redo re-applies the result. History entries hold their source images until the 100-step bound or a new `reset` drops them. The latest `replaceBase` wins; a failed or superseded load, or a base changed by crop, resize or adjustments while loading, rejects and leaves the draft untouched. Save `getSourceBlob()` with `getDocument()` as usual: after an AI edit the source is the AI result and the document places it. Use `reset(resultUrl)` instead only when the result should start a new baseline without layers or history. No hosted engine code or assets have been copied into this package.
 
 ## Development and verification
 

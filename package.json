@@ -55,7 +55,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:package": "node test/document-module.mjs",
-    "test:browser": "node test/browser.mjs && node test/core-browser.mjs && node test/browser-interactions.mjs && node test/browser-ui.mjs && node test/browser-path-selection.mjs && node test/browser-rich-text.mjs && node test/browser-text-ui.mjs && node test/browser-text-contrast.mjs && node test/browser-crop.mjs && node test/browser-crop-ui.mjs && node test/browser-crop-overlays.mjs && node test/browser-assets.mjs && node test/browser-rights.mjs",
+    "test:browser": "node test/browser.mjs && node test/core-browser.mjs && node test/browser-interactions.mjs && node test/browser-ui.mjs && node test/browser-path-selection.mjs && node test/browser-rich-text.mjs && node test/browser-text-ui.mjs && node test/browser-text-contrast.mjs && node test/browser-crop.mjs && node test/browser-crop-ui.mjs && node test/browser-crop-overlays.mjs && node test/browser-assets.mjs && node test/browser-rights.mjs && node test/browser-replace-base.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",

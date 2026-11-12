@@ -1,11 +1,14 @@
 import {
   createDocument,
+  DEFAULT_EFFECTS,
   dimensions,
   DocumentHistory,
   ImageDocument,
   Layer,
   parseDocument,
+  scale,
   translate,
+  type Matrix,
 } from './model';
 import { exportCanvas, fitTextLayer } from './render';
 import {
@@ -58,7 +61,16 @@ export type EngineState = {
   canUndo: boolean;
   canRedo: boolean;
   revision: number;
+  /** Changes when a new image is loaded as the baseline; the UI restarts. */
   imageRevision: number;
+  /** Identifies the source pixels on screen; base replacement and undo move it. */
+  sourceRevision: number;
+};
+/** Source pixels referenced by a history entry. */
+type SourceRecord = {
+  image: LoadedImage;
+  exif: Uint8Array | null;
+  key: number;
 };
 /** Pixels decoded and re-encoded as a PNG data URL, so documents stay self-contained. */
 export type EmbeddedImage = {
@@ -135,6 +147,57 @@ function decodeImage(url: string, signal: AbortSignal): Promise<LoadedImage> {
     image.src = url;
   });
 }
+async function readSourceExif(image: LoadedImage) {
+  if (!image.sourceBlob) return null;
+  const signature = new Uint8Array(
+    await image.sourceBlob.slice(0, 2).arrayBuffer()
+  );
+  return signature[0] === 0xff && signature[1] === 0xd8
+    ? readJpegExif(new Uint8Array(await image.sourceBlob.arrayBuffer()))
+    : null;
+}
+/** The pixels AI and other base edits replace: no frame, background, corners or
+ * layers, except visible redactions, so hidden content never leaves the editor.
+ * Redactions also stay layers above the replacement. */
+function baseDocument(doc: ImageDocument): ImageDocument {
+  return {
+    ...doc,
+    layers: doc.layers.filter(
+      (layer) => layer.kind === 'redaction' && !layer.hidden
+    ),
+    background: 'transparent',
+    frame: { ...doc.frame, style: 'none' },
+    cornerRadius: 0,
+  };
+}
+/** Largest relative aspect difference that is stretched rather than cover-fitted. */
+export const BASE_STRETCH_TOLERANCE = 0.015;
+/**
+ * Image models return a nearby supported size. A rounding-sized aspect difference is
+ * stretched invisibly, keeping masks and layers exactly aligned. A larger difference is
+ * cover-fitted and centered, preserving the aspect ratio: the model rendered the same
+ * scene for its own canvas. Overflowing pixels stay in the source, recoverable by crop.
+ */
+export function placeBase(
+  doc: Pick<ImageDocument, 'width' | 'height'>,
+  image: { width: number; height: number }
+): Matrix {
+  const x = doc.width / image.width,
+    y = doc.height / image.height;
+  if (Math.max(x, y) / Math.min(x, y) - 1 <= BASE_STRETCH_TOLERANCE)
+    return scale(x, y);
+  const factor = Math.max(x, y);
+  return [
+    factor,
+    0,
+    0,
+    factor,
+    (doc.width - image.width * factor) / 2,
+    (doc.height - image.height * factor) / 2,
+  ];
+}
+const baseKey = (doc: ImageDocument) =>
+  JSON.stringify([doc.width, doc.height, doc.imageMatrix, doc.effects]);
 export async function loadImage(
   url: string,
   signal: AbortSignal
@@ -166,10 +229,14 @@ export class CanvasEngine implements ImageEditorInstance {
     canRedo: false,
     revision: 0,
     imageRevision: 0,
+    sourceRevision: 0,
   };
   private listeners = new Set<() => void>();
   private changes = new Set<(change: ImageEditorChange) => void>();
   private imageKey = 0;
+  private sourceKey = 0;
+  private source: SourceRecord | null = null;
+  private replaceController: AbortController | null = null;
   private generation = 0;
   /** Tracks document ownership separately from render and no-op lifecycle notifications. */
   private documentRevision = 0;
@@ -177,7 +244,7 @@ export class CanvasEngine implements ImageEditorInstance {
   private url = '';
   private loadedUrl = '';
   private exportFinalizer: (() => void) | null = null;
-  private history: DocumentHistory | null = null;
+  private history: DocumentHistory<SourceRecord> | null = null;
   private sourceExif: Uint8Array | null = null;
   private restoreGeneration = 0;
   private assetControllers = new Set<AbortController>();
@@ -214,7 +281,7 @@ export class CanvasEngine implements ImageEditorInstance {
         height: doc.height,
         hasChanges: this.hasChanges(),
         geometryKey: JSON.stringify([
-          this.imageKey,
+          this.source?.key ?? 0,
           doc.width,
           doc.height,
           doc.imageMatrix,
@@ -243,6 +310,7 @@ export class CanvasEngine implements ImageEditorInstance {
     this.releaseFonts = null;
     this.exportFinalizer = null;
     this.image = null;
+    this.source = null;
     this.sourceExif = null;
     this.history = null;
     this.emit({
@@ -283,19 +351,12 @@ export class CanvasEngine implements ImageEditorInstance {
         url,
         controller.signal
       );
-      let sourceExif: Uint8Array | null = null;
-      if (image.sourceBlob) {
-        const signature = new Uint8Array(
-          await image.sourceBlob.slice(0, 2).arrayBuffer()
-        );
-        if (signature[0] === 0xff && signature[1] === 0xd8)
-          sourceExif = readJpegExif(
-            new Uint8Array(await image.sourceBlob.arrayBuffer())
-          );
-      }
+      const sourceExif = await readSourceExif(image);
       if (generation !== this.generation || controller.signal.aborted)
         throw abortError();
       const doc = createDocument(image.width, image.height);
+      const source = { image, exif: sourceExif, key: ++this.sourceKey };
+      this.source = source;
       this.image = image;
       this.sourceExif = sourceExif;
       this.assetControllers.forEach((pending) => pending.abort());
@@ -304,7 +365,7 @@ export class CanvasEngine implements ImageEditorInstance {
       this.loadedUrl = url;
       this.imageKey++;
       this.exportFinalizer = null;
-      this.history = new DocumentHistory(doc);
+      this.history = new DocumentHistory(doc, 100, source);
       this.emit({
         phase: 'ready',
         document: doc,
@@ -315,6 +376,7 @@ export class CanvasEngine implements ImageEditorInstance {
         canRedo: false,
         revision: this.state.revision + 1,
         imageRevision: this.imageKey,
+        sourceRevision: source.key,
       });
       this.changed();
     } catch (error) {
@@ -449,6 +511,80 @@ export class CanvasEngine implements ImageEditorInstance {
       canvas.height
     );
     return new Blob([bytes as Uint8Array<ArrayBuffer>], { type: blob.type });
+  }
+  /** The photo at document size with its geometry and adjustments, without layers or decoration. */
+  getBaseImage(options: ImageExportOptions = {}) {
+    if (this.state.phase !== 'ready') return null;
+    const output = parseExportOptions({ type: 'image/png', ...options });
+    this.flush();
+    if (!this.history || !this.image) return null;
+    const canvas = exportCanvas(
+        baseDocument(this.history.current),
+        this.image.source,
+        output
+      ),
+      dataUrl = canvas.toDataURL(output.type, output.quality);
+    return output.metadata === 'preserve'
+      ? addJpegExifToDataUrl(
+          dataUrl,
+          this.sourceExif,
+          canvas.width,
+          canvas.height
+        )
+      : dataUrl;
+  }
+  /**
+   * Replace the base pixels with an edited copy of getBaseImage(), as one undoable
+   * edit. The new source fills the document, so geometry and adjustments already
+   * baked into it are reset; layers, frame and background stay editable. Undo
+   * restores the previous source, geometry and adjustments exactly. The latest
+   * replacement wins, and a failed or superseded load leaves the draft untouched.
+   */
+  async replaceBase(input: string | LoadedImage): Promise<void> {
+    if (this.state.phase !== 'ready' || !this.history)
+      throw new Error('Editor is not ready');
+    const generation = this.generation,
+      previous = this.history.source,
+      previousBase = baseKey(this.history.current),
+      controller = new AbortController();
+    this.replaceController?.abort();
+    this.replaceController = controller;
+    this.assetControllers.add(controller);
+    try {
+      const image =
+          typeof input === 'string'
+            ? await (this.state.options.imageLoader ?? this.loader)(
+                input,
+                controller.signal
+              )
+            : input,
+        exif = await readSourceExif(image);
+      dimensions(image.width, image.height);
+      if (
+        generation !== this.generation ||
+        controller.signal.aborted ||
+        this.state.phase !== 'ready' ||
+        !this.history ||
+        this.history.source !== previous ||
+        baseKey(this.history.current) !== previousBase
+      )
+        throw abortError();
+      this.flush();
+      const doc = this.history.current;
+      this.history.commit(
+        {
+          ...doc,
+          imageMatrix: placeBase(doc, image),
+          effects: DEFAULT_EFFECTS,
+        },
+        { image, exif, key: ++this.sourceKey }
+      );
+      this.publish(true);
+    } finally {
+      controller.abort();
+      this.assetControllers.delete(controller);
+      if (this.replaceController === controller) this.replaceController = null;
+    }
   }
   getSource() {
     return this.image?.source ?? null;
@@ -667,7 +803,9 @@ export class CanvasEngine implements ImageEditorInstance {
     if (this.state.phase !== 'ready' || !this.history) return;
     this.exportFinalizer = null;
     this.history.cancel();
-    this.commit(this.history.baseline);
+    this.publish(
+      this.history.commit(this.history.baseline, this.history.baselineSource)
+    );
     this.select(null);
   }
   hasChanges() {
@@ -696,6 +834,12 @@ export class CanvasEngine implements ImageEditorInstance {
     // Derived measurements are not an ownership change; they must not abort a pending restore.
     if (this.history.current !== this.state.document && !derived)
       this.documentRevision++;
+    const source = this.history.source;
+    if (source !== this.source) {
+      this.source = source;
+      this.image = source.image;
+      this.sourceExif = source.exif;
+    }
     const selectedIds = this.state.selectedIds.filter((id) =>
         this.history!.current.layers.some(
           (layer) => layer.id === id && this.selectable(layer)
@@ -706,9 +850,10 @@ export class CanvasEngine implements ImageEditorInstance {
       document: this.history.current,
       selected,
       selectedIds,
-      canUndo: this.history.past.length > 0,
-      canRedo: this.history.future.length > 0,
+      canUndo: this.history.canUndo,
+      canRedo: this.history.canRedo,
       revision: this.state.revision + 1,
+      sourceRevision: source.key,
     });
     this.syncFonts();
     if (committed) this.changed();

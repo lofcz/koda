@@ -152,11 +152,27 @@ export interface ImageEditorInstance {
   getBlob(options?: ImageExportOptions): Promise<Blob>;
   /** Resolves when the document's catalog fonts loaded, failed or timed out; getImage() is synchronous and does not wait. */
   fontsReady(timeout?: number): Promise<FontReadiness>;
+  /**
+   * The photo with its crop, rotation, resize and adjustments at document size, without
+   * layers, frame, background or rounded corners. Visible redactions are applied, so
+   * hidden content is never sent anywhere. Defaults to PNG without metadata.
+   * Coordinates match the document, so a mask drawn over the document lines up.
+   */
+  getBaseImage(options?: ImageExportOptions): string | null;
+  /**
+   * Replace the base pixels (usually an edited getBaseImage() result) as one undoable edit.
+   * The new source fills the document: an aspect difference up to 1.5% is stretched, a larger
+   * one is centered and cover-fitted without distortion. Geometry and adjustments it already
+   * contains are reset. Layers, frame and background stay editable. Undo restores the
+   * previous source pixels, geometry and adjustments. The latest call wins; a failed or
+   * superseded load, or a base changed while loading, rejects and leaves the draft untouched.
+   */
+  replaceBase(image: string | ImageEditorLoadedImage): Promise<void>;
   /** Independent, validated output settings, suitable for persistence alongside the document. */
   getExportOptions(): ImageExportOptions;
   /** Independent JSON-safe editable state; the host owns the original image source separately. */
   getDocument(): ImageDocument | null;
-  /** Restores state against the currently loaded original image; failure preserves the draft. */
+  /** Restores state against the current source image; failure preserves the draft. */
   restoreDocument(document: ImageDocument | string): Promise<void>;
   /** Import an image as an editable, embedded layer. */
   addImage(url: string): Promise<void>;
@@ -164,11 +180,11 @@ export interface ImageEditorInstance {
   getLayerRights(id: string): ResolvedLayerRights | null;
   /** Replace one layer's own rights (null clears them) without an undoable edit. */
   setLayerRights(id: string, rights: LayerRights | null): void;
-  /** Original loaded pixels for thumbnails and comparison. */
+  /** Current source pixels (the loaded image, or the latest replaceBase image) for thumbnails and comparison. */
   getSource(): CanvasImageSource | null;
-  /** Original encoded source, independent of crop, layers and output settings. */
+  /** Current encoded source, independent of crop, layers and output settings. Persist it with getDocument(). */
   getSourceBlob(): Promise<Blob>;
-  /** Restore the original document as one undoable edit, without reloading the source. */
+  /** Restore the original document and source as one undoable edit, without reloading the source. */
   revert(): void;
   hasChanges(): boolean;
   /** Presentation changes do not reset the document or its history. */
