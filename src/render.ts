@@ -242,6 +242,10 @@ function pixelateSample(
   return cells.canvas;
 }
 
+function deviceScale(m: DOMMatrix) {
+  return Math.sqrt(Math.abs(m.a * m.d - m.b * m.c));
+}
+
 /** Canvas features that differ between engines, detected once by drawing. */
 let support: { filter: boolean; strokeShadow: boolean } | undefined;
 function canvasSupport() {
@@ -308,7 +312,7 @@ function paintFeathered(
   layer: Layer,
   assets: ImageAssets
 ) {
-  const sigma = layer.feather ?? 0,
+  const sigma = (layer.feather ?? 0) * deviceScale(ctx.getTransform()),
     points = layer.kind === 'path' ? (layer.points ?? []) : [],
     xs = points.length ? points.map((p) => p.x) : [0, layer.width],
     ys = points.length ? points.map((p) => p.y) : [0, layer.height],
@@ -380,6 +384,10 @@ export function renderLayer(
   if (layer.feather && layer.kind !== 'redaction' && !canvasSupport().filter)
     return paintFeathered(ctx, layer, assets);
   ctx.save();
+  // Blur and shadow lengths are device pixels that ignore the transform.
+  // Feather is in document pixels, so scale it by the transform outside the
+  // layer (identity on export, the view scale on reduced previews).
+  const outer = deviceScale(ctx.getTransform());
   apply(ctx, layer.matrix);
   ctx.globalAlpha = layer.opacity;
   ctx.globalCompositeOperation = layer.erase
@@ -389,7 +397,7 @@ export function renderLayer(
   ctx.lineCap = layer.strokeCap ?? 'round';
   ctx.lineJoin = layer.strokeJoin ?? 'round';
   ctx.setLineDash([...(layer.strokeDash ?? [])]);
-  if (layer.feather) ctx.filter = `blur(${layer.feather}px)`;
+  if (layer.feather) ctx.filter = `blur(${layer.feather * outer}px)`;
   ctx.strokeStyle = layer.color;
   ctx.fillStyle = layer.fill;
   if (layer.kind === 'image') {
@@ -421,19 +429,13 @@ export function renderLayer(
         ctx.fillStyle = style.color;
         const shadow = layer.textShadow;
         if (shadow) {
+          // Shadows are device-space: map the local offset through the whole
+          // transform, which is the layer matrix alone on export.
+          const m = ctx.getTransform();
           ctx.shadowColor = shadow.color;
-          ctx.shadowBlur =
-            shadow.blur *
-            Math.sqrt(
-              Math.abs(
-                layer.matrix[0] * layer.matrix[3] -
-                  layer.matrix[1] * layer.matrix[2]
-              )
-            );
-          ctx.shadowOffsetX =
-            layer.matrix[0] * shadow.offsetX + layer.matrix[2] * shadow.offsetY;
-          ctx.shadowOffsetY =
-            layer.matrix[1] * shadow.offsetX + layer.matrix[3] * shadow.offsetY;
+          ctx.shadowBlur = shadow.blur * deviceScale(m);
+          ctx.shadowOffsetX = m.a * shadow.offsetX + m.c * shadow.offsetY;
+          ctx.shadowOffsetY = m.b * shadow.offsetX + m.d * shadow.offsetY;
         }
         if (layer.textOutline?.width) {
           ctx.lineWidth = layer.textOutline.width * 2;
@@ -750,6 +752,7 @@ type Composition = {
   mask?: HTMLCanvasElement;
   decoration?: CompositionDecoration;
   filterScale?: number;
+  scale?: number;
 };
 const compositions = new WeakMap<object, Composition>();
 const viewCompositions = new WeakMap<object, Composition>();
@@ -959,25 +962,32 @@ function compose(
   assets: ImageAssets,
   decoration?: CompositionDecoration,
   cache = compositions,
-  filterScale = 1
+  filterScale = 1,
+  scale = 1
 ) {
   const cached = cache.get(image);
   if (
     cached?.doc === doc &&
     cached.assets === assets &&
     cached.decoration === decoration &&
-    cached.filterScale === filterScale
+    cached.filterScale === filterScale &&
+    cached.scale === scale
   )
     return cached.canvas;
-  const canvas = cached?.canvas ?? surface(doc.width, doc.height).canvas;
-  if (canvas.width !== doc.width || canvas.height !== doc.height) {
-    canvas.width = doc.width;
-    canvas.height = doc.height;
+  // `scale` < 1 composes a reduced copy for the screen; document coordinates
+  // are unchanged, the canvas only holds fewer pixels.
+  const width = Math.max(1, Math.ceil(doc.width * scale)),
+    height = Math.max(1, Math.ceil(doc.height * scale)),
+    canvas = cached?.canvas ?? surface(width, height).canvas;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
   }
   const ctx = canvas.getContext('2d')!;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const frameDoc = decoration?.document ?? doc;
   ctx.save();
+  ctx.scale(scale, scale);
   ctx.save();
   if (decoration) apply(ctx, decoration.matrix);
   roundedRect(
@@ -1011,31 +1021,36 @@ function compose(
   let base = cached?.base,
     mask = cached?.mask;
   if (doc.layers.some((layer) => layer.erase && !layer.hidden)) {
-    base ??= surface(doc.width, doc.height).canvas;
-    if (base.width !== doc.width || base.height !== doc.height) {
-      base.width = doc.width;
-      base.height = doc.height;
+    base ??= surface(width, height).canvas;
+    if (base.width !== width || base.height !== height) {
+      base.width = width;
+      base.height = height;
     }
     const baseContext = base.getContext('2d')!;
-    baseContext.clearRect(0, 0, doc.width, doc.height);
+    baseContext.clearRect(0, 0, width, height);
     baseContext.drawImage(canvas, 0, 0);
-    mask ??= surface(doc.width, doc.height).canvas;
+    mask ??= surface(width, height).canvas;
   }
   doc.layers.forEach((layer) => {
     renderLayer(ctx, layer, assets);
     if (layer.erase && !layer.hidden && base && mask) {
-      if (mask.width !== doc.width || mask.height !== doc.height) {
-        mask.width = doc.width;
-        mask.height = doc.height;
+      if (mask.width !== width || mask.height !== height) {
+        mask.width = width;
+        mask.height = height;
       }
       const maskContext = mask.getContext('2d')!;
-      maskContext.clearRect(0, 0, doc.width, doc.height);
+      maskContext.setTransform(1, 0, 0, 1, 0, 0);
+      maskContext.clearRect(0, 0, width, height);
+      maskContext.setTransform(scale, 0, 0, scale, 0, 0);
       renderLayer(maskContext, { ...layer, erase: false }, assets);
+      maskContext.setTransform(1, 0, 0, 1, 0, 0);
       maskContext.globalCompositeOperation = 'source-in';
       maskContext.drawImage(base, 0, 0);
+      maskContext.globalCompositeOperation = 'source-over';
       // Restore the original photo under the erased markup. Additive compositing
       // after destination-out also preserves semitransparent photo pixels exactly.
       ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalCompositeOperation = 'lighter';
       ctx.drawImage(mask, 0, 0);
       ctx.restore();
@@ -1054,6 +1069,7 @@ function compose(
     mask,
     decoration,
     filterScale,
+    scale,
   });
   return canvas;
 }
@@ -1165,7 +1181,41 @@ export function paintDocument(
 ) {
   ctx.save();
   apply(ctx, view);
-  ctx.drawImage(compose(doc, image, assets), 0, 0);
+  // When the view shows the document smaller than its pixels, compose a copy
+  // at about display resolution instead of every document pixel, and filter
+  // effects on a matching copy of the source. Half-octave steps keep zooming
+  // from recomposing every frame. Export composes at full resolution through
+  // its own cache.
+  const m = ctx.getTransform(),
+    i = doc.imageMatrix,
+    step = (value: number) =>
+      value >= 1 ? 1 : Math.pow(2, Math.ceil(Math.log2(value) * 2) / 2),
+    display = deviceScale(m),
+    scale = step(display),
+    filterScale = step(
+      display * Math.sqrt(Math.abs(i[0] * i[3] - i[1] * i[2]))
+    );
+  if (scale < 1 || filterScale < 1)
+    ctx.drawImage(
+      compose(
+        doc,
+        image,
+        assets,
+        undefined,
+        viewCompositions,
+        filterScale,
+        scale
+      ),
+      0,
+      0,
+      doc.width * scale,
+      doc.height * scale,
+      0,
+      0,
+      doc.width,
+      doc.height
+    );
+  else ctx.drawImage(compose(doc, image, assets), 0, 0);
   ctx.restore();
 }
 export function exportCanvas(

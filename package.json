@@ -59,6 +59,7 @@
     "test:browser:firefox": "node test/run-browsers.mjs firefox",
     "test:browser:webkit": "node test/run-browsers.mjs webkit",
     "test:a11y": "node test/browser-a11y.mjs",
+    "test:perf": "node test/perf.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
