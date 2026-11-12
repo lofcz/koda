@@ -59,6 +59,8 @@ jobs:
         timeout-minutes: 5
       - run: pnpm run test:browser
         timeout-minutes: 10
+      - run: pnpm run test:a11y
+        timeout-minutes: 10
       - name: Bump and commit release
         id: release
         env:

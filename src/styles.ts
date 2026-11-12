@@ -61,7 +61,7 @@ export const styles = `
  .image-editor-root [data-testid="native-resize-lock"]{grid-column:1/-1}
  .image-editor-root .rie-presets{grid-template-columns:repeat(5,minmax(0,1fr))}
 }
-.image-editor-root{--rie-bg:#fff;--rie-panel:#fff;--rie-muted:#edf0f3;--rie-line:#e5e8ed;--rie-fg:#242d3b;--rie-secondary:#6b7585;--rie-accent:#087f8c;--rie-tint:#e6f4f5;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+.image-editor-root{--rie-bg:#fff;--rie-panel:#fff;--rie-muted:#edf0f3;--rie-line:#e5e8ed;--rie-fg:#242d3b;--rie-secondary:#6b7585;--rie-accent:#077784;--rie-tint:#e6f4f5;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
 .image-editor-root[data-scheme="dark"]{--rie-bg:#171b22;--rie-panel:#1d222b;--rie-muted:#11151b;--rie-line:#303744;--rie-fg:#edf0f5;--rie-secondary:#a1aabc;--rie-accent:#6dd5de;--rie-tint:#203d43}
 .image-editor-root button{min-height:36px;padding:8px 11px;gap:7px;transition:transform .12s;flex-shrink:0}
 .image-editor-root button[aria-pressed="true"],.image-editor-root button[aria-selected="true"]{background:var(--rie-tint);border-color:transparent;color:var(--rie-accent)}
@@ -179,7 +179,7 @@ export const styles = `
 .image-editor-root .rie-layer-row>button:first-child{flex:1;flex-shrink:1}
 .image-editor-root .rie-layer-row .rie-icon-button{width:28px;min-height:32px;padding:5px;justify-content:center}
 .image-editor-root .rie-help{font-size:11px;line-height:1.6}
-.image-editor-root .rie-shortcuts{padding:10px 16px;background:var(--rie-tint);border-bottom:1px solid var(--rie-line)}
+.image-editor-root .rie-shortcuts{padding:10px 16px;background:var(--rie-tint);border-bottom:1px solid var(--rie-line);color:var(--rie-fg)}
 .image-editor-root .rie-error{padding:9px 14px}
 .image-editor-root .rie-canvas[data-drag-over="true"]{outline:3px dashed var(--rie-accent);outline-offset:-12px;background:var(--rie-tint)}
 .image-editor-root .rie-canvas .rie-canvas-text{padding:0;resize:none;outline:2px solid var(--rie-accent);outline-offset:4px;box-shadow:0 0 0 5px var(--rie-bg);border-radius:0;min-height:0}
