@@ -6,7 +6,20 @@ import {
   parseDocument,
   translate,
 } from './model';
-import { exportCanvas } from './render';
+import { exportCanvas, fitTextLayer } from './render';
+import {
+  catalogFonts,
+  DEFAULT_FONT_LOAD_TIMEOUT,
+  DEFAULT_FONTS,
+  documentFamilies,
+  fontRegistry,
+  layerUsesFamily,
+  parseFontCatalog,
+  waitForFonts,
+} from './fonts';
+import type { FontReadiness } from './fonts';
+import { parseFrameCatalog } from './frames';
+import { parseBackgroundCatalog } from './backgrounds';
 import { parseExportOptions } from './exportOptions';
 import { parseCropOptions } from './crop';
 import {
@@ -37,6 +50,27 @@ export type EngineState = {
   revision: number;
   imageRevision: number;
 };
+/** Pixels decoded and re-encoded as a PNG data URL, so documents stay self-contained. */
+export type EmbeddedImage = {
+  source: string;
+  canvas: HTMLCanvasElement;
+  width: number;
+  height: number;
+};
+/** Every decoded asset a document needs: image layers, background image and image frame. */
+export function documentAssetSources(doc: ImageDocument): string[] {
+  return [
+    ...new Set([
+      ...doc.layers
+        .filter((layer) => layer.kind === 'image' && layer.imageSource)
+        .map((layer) => layer.imageSource!),
+      ...(doc.backgroundImage ? [doc.backgroundImage.source] : []),
+      ...(doc.frame.style === 'image' && doc.frame.image
+        ? [doc.frame.image.source]
+        : []),
+    ]),
+  ];
+}
 export const abortError = () =>
   new DOMException('Image loading was superseded', 'AbortError');
 export const isAbort = (error: unknown) =>
@@ -137,6 +171,8 @@ export class CanvasEngine implements ImageEditorInstance {
   private sourceExif: Uint8Array | null = null;
   private restoreGeneration = 0;
   private assetControllers = new Set<AbortController>();
+  private embeds = new Map<string, Promise<EmbeddedImage>>();
+  private releaseFonts: (() => void) | null = null;
   /** Decoded image layers are owned by the engine; documents only contain serializable sources. */
   assets = new Map<string, CanvasImageSource>();
   image: LoadedImage | null = null;
@@ -190,6 +226,9 @@ export class CanvasEngine implements ImageEditorInstance {
     this.assetControllers.forEach((controller) => controller.abort());
     this.assetControllers.clear();
     this.assets = new Map();
+    this.embeds.clear();
+    this.releaseFonts?.();
+    this.releaseFonts = null;
     this.exportFinalizer = null;
     this.image = null;
     this.sourceExif = null;
@@ -291,7 +330,16 @@ export class CanvasEngine implements ImageEditorInstance {
     } = options;
     if (presentation.crop !== undefined)
       presentation.crop = parseCropOptions(presentation.crop);
+    if (presentation.fonts !== undefined)
+      presentation.fonts = parseFontCatalog(presentation.fonts);
+    if (presentation.frames !== undefined)
+      presentation.frames = parseFrameCatalog(presentation.frames);
+    if (presentation.backgrounds !== undefined)
+      presentation.backgrounds = parseBackgroundCatalog(
+        presentation.backgrounds
+      );
     this.emit({ options: { ...this.state.options, ...presentation } });
+    if (presentation.fonts !== undefined) this.syncFonts();
     if (url !== undefined && url !== this.url)
       void this.reset(url).catch(() => {
         /* Failure is exposed in state and the component callback. */
@@ -313,6 +361,14 @@ export class CanvasEngine implements ImageEditorInstance {
     this.flush();
     const output = this.outputOptions(options);
     if (!this.history || !this.image) return null;
+    const pending = this.documentFonts().filter(
+      (font) => fontRegistry.status(font) !== 'loaded'
+    );
+    if (pending.length)
+      console.warn(
+        '[react-image-editor] getImage() drew text with fallback fonts. Await fontsReady() or use getBlob().',
+        pending.map((font) => font.id)
+      );
     const canvas = exportCanvas(
         this.history.current,
         this.image.source,
@@ -335,6 +391,13 @@ export class CanvasEngine implements ImageEditorInstance {
     this.outputOptions(options);
     this.flush();
     const output = this.outputOptions(options);
+    const fonts = await this.fontsReady();
+    if (fonts.failed.length)
+      console.warn(
+        '[react-image-editor] Exported text with fallback fonts for fonts that failed or timed out.',
+        fonts.failed
+      );
+    if (!this.history || !this.image) throw new Error('Editor is not ready');
     const canvas = exportCanvas(
       this.history.current,
       this.image.source,
@@ -394,13 +457,7 @@ export class CanvasEngine implements ImageEditorInstance {
       restoreGeneration = ++this.restoreGeneration,
       documentRevision = this.documentRevision,
       controller = new AbortController(),
-      sources = [
-        ...new Set(
-          doc.layers
-            .filter((layer) => layer.kind === 'image')
-            .map((layer) => layer.imageSource!)
-        ),
-      ],
+      sources = documentAssetSources(doc),
       assets = new Map(this.assets);
     this.assetControllers.add(controller);
     try {
@@ -436,65 +493,148 @@ export class CanvasEngine implements ImageEditorInstance {
   async addImage(url: string): Promise<void> {
     if (this.state.phase !== 'ready' || !this.history)
       throw new Error('Editor is not ready');
+    const generation = this.generation;
+    // Embed a raster snapshot so saved documents never depend on revoked blob URLs.
+    const size = await this.embedImage(url, false);
+    if (
+      generation !== this.generation ||
+      this.state.phase !== 'ready' ||
+      !this.history
+    )
+      throw abortError();
+    const imageSource = size.source,
+      doc = this.history.current,
+      factor = Math.min(
+        1,
+        (doc.width * 0.6) / size.width,
+        (doc.height * 0.6) / size.height
+      ),
+      width = size.width * factor,
+      height = size.height * factor,
+      id = crypto.randomUUID();
+    this.commit({
+      ...doc,
+      layers: [
+        ...doc.layers,
+        {
+          id,
+          kind: 'image',
+          imageSource,
+          matrix: translate((doc.width - width) / 2, (doc.height - height) / 2),
+          width,
+          height,
+          color: '#000000',
+          fill: 'transparent',
+          strokeWidth: 0,
+          opacity: 1,
+        },
+      ],
+    });
+    this.select(id);
+  }
+  /**
+   * Load a URL through the image loader and embed a PNG snapshot, registered as
+   * a render asset. Saved documents never depend on revoked blob URLs or on a
+   * host catalog. `cache` shares one load per URL (catalog previews).
+   */
+  embedImage(url: string, cache = true): Promise<EmbeddedImage> {
+    if (this.state.phase !== 'ready')
+      return Promise.reject(new Error('Editor is not ready'));
+    const cached = cache ? this.embeds.get(url) : undefined;
+    if (cached)
+      return cached.then((embedded) => {
+        this.assets.set(embedded.source, embedded.canvas);
+        return embedded;
+      });
     const generation = this.generation,
       controller = new AbortController();
     this.assetControllers.add(controller);
-    try {
-      const image = await (this.state.options.imageLoader ?? this.loader)(
-          url,
-          controller.signal
-        ),
-        size = dimensions(image.width, image.height);
-      if (
-        generation !== this.generation ||
-        controller.signal.aborted ||
-        this.state.phase !== 'ready'
-      )
-        throw abortError();
-      // Embed a raster snapshot so saved documents never depend on revoked blob URLs.
-      const canvas = document.createElement('canvas');
-      canvas.width = size.width;
-      canvas.height = size.height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Canvas2D is unavailable');
-      ctx.drawImage(image.source, 0, 0, size.width, size.height);
-      const imageSource = canvas.toDataURL('image/png'),
-        doc = this.history.current,
-        factor = Math.min(
-          1,
-          (doc.width * 0.6) / size.width,
-          (doc.height * 0.6) / size.height
-        ),
-        width = size.width * factor,
-        height = size.height * factor,
-        id = crypto.randomUUID();
-      this.assets.set(imageSource, canvas);
-      this.commit({
-        ...doc,
-        layers: [
-          ...doc.layers,
-          {
-            id,
-            kind: 'image',
-            imageSource,
-            matrix: translate(
-              (doc.width - width) / 2,
-              (doc.height - height) / 2
-            ),
-            width,
-            height,
-            color: '#000000',
-            fill: 'transparent',
-            strokeWidth: 0,
-            opacity: 1,
-          },
-        ],
+    const promise = (async () => {
+      try {
+        const image = await (this.state.options.imageLoader ?? this.loader)(
+            url,
+            controller.signal
+          ),
+          size = dimensions(image.width, image.height);
+        if (generation !== this.generation || controller.signal.aborted)
+          throw abortError();
+        const canvas = document.createElement('canvas');
+        canvas.width = size.width;
+        canvas.height = size.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Canvas2D is unavailable');
+        ctx.drawImage(image.source, 0, 0, size.width, size.height);
+        const source = canvas.toDataURL('image/png');
+        this.assets.set(source, canvas);
+        return { source, canvas, ...size };
+      } finally {
+        controller.abort();
+        this.assetControllers.delete(controller);
+      }
+    })();
+    if (cache) {
+      this.embeds.set(url, promise);
+      promise.catch(() => {
+        if (this.embeds.get(url) === promise) this.embeds.delete(url);
       });
-      this.select(id);
-    } finally {
-      controller.abort();
-      this.assetControllers.delete(controller);
     }
+    return promise;
+  }
+  private documentFonts() {
+    const doc = this.history?.current;
+    return doc
+      ? catalogFonts(
+          documentFamilies(doc),
+          this.state.options.fonts ?? DEFAULT_FONTS
+        )
+      : [];
+  }
+  /** Start loading catalog fonts the document uses; re-measure text when they arrive. */
+  private syncFonts() {
+    if (this.state.phase !== 'ready') return;
+    this.releaseFonts ??= fontRegistry.subscribe((family) =>
+      this.fontChanged(family)
+    );
+    for (const font of this.documentFonts())
+      if (fontRegistry.status(font) === 'unloaded')
+        void fontRegistry.load(font);
+  }
+  private fontChanged(family: string) {
+    const doc = this.history?.current;
+    if (!doc || this.state.phase !== 'ready') return;
+    if (
+      !doc.layers.some(
+        (layer) => layer.kind === 'text' && layerUsesFamily(layer, family)
+      )
+    )
+      return;
+    // Auto-sized boxes are measurements of the text; a new face changes them.
+    // A new document object also invalidates cached compositions.
+    let next: ImageDocument;
+    try {
+      next = {
+        ...doc,
+        layers: doc.layers.map((layer) =>
+          layer.kind !== 'text' || !layerUsesFamily(layer, family)
+            ? layer
+            : layer.textLayout === 'auto-width' ||
+                layer.textLayout === 'auto-height'
+              ? fitTextLayer(layer)
+              : { ...layer }
+        ),
+      };
+    } catch {
+      return;
+    }
+    this.history!.replace(next);
+    this.publish(false, true);
+  }
+  /** Wait for every catalog font the document uses, up to `fontLoadTimeout` (default 5 s). */
+  async fontsReady(
+    timeout = this.state.options.fontLoadTimeout ?? DEFAULT_FONT_LOAD_TIMEOUT
+  ): Promise<FontReadiness> {
+    this.syncFonts();
+    return waitForFonts(this.documentFonts(), timeout);
   }
   revert() {
     if (this.state.phase !== 'ready' || !this.history) return;
@@ -524,9 +664,11 @@ export class CanvasEngine implements ImageEditorInstance {
         : [...this.state.selectedIds, id]
     );
   }
-  private publish(committed = false) {
+  private publish(committed = false, derived = false) {
     if (!this.history) return;
-    if (this.history.current !== this.state.document) this.documentRevision++;
+    // Derived measurements are not an ownership change; they must not abort a pending restore.
+    if (this.history.current !== this.state.document && !derived)
+      this.documentRevision++;
     const selectedIds = this.state.selectedIds.filter((id) =>
         this.history!.current.layers.some(
           (layer) => layer.id === id && !layer.locked && !layer.hidden
@@ -541,6 +683,7 @@ export class CanvasEngine implements ImageEditorInstance {
       canRedo: this.history.future.length > 0,
       revision: this.state.revision + 1,
     });
+    this.syncFonts();
     if (committed) this.changed();
   }
   commit(document: ImageDocument) {
