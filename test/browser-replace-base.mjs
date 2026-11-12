@@ -104,6 +104,7 @@ try {
     aiPatch: [250, 150],
     transparent: [560, 330],
     corner: [2, 2],
+    redacted: [50, 340],
   };
 
   /** The unfiltered preset preview cover-fits the source into 144x96; (60,36)
@@ -120,7 +121,7 @@ try {
   assert.deepEqual(await thumbnail(), [255, 0, 0, 255]);
 
   // Manual edits before the AI step: a photo filter, a frame, a background fill,
-  // a brush stroke and a text layer.
+  // a brush stroke, a text layer and a solid redaction over (20,300)-(80,380).
   await page.getByTestId('native-tool-filter').click();
   await page.getByTestId('native-filter-preset-invert').click();
   await page.getByTestId('native-tool-frame').click();
@@ -147,10 +148,32 @@ try {
   await page.getByTestId('native-text-add').click();
   await page.getByTestId('native-text-content').fill('Before AI');
   await page.getByTestId('native-text-content').blur();
+  await page.evaluate(() => {
+    const editor = window.localEditor,
+      current = editor.getSnapshot().document;
+    editor.commit({
+      ...current,
+      layers: [
+        {
+          id: 'redaction',
+          kind: 'redaction',
+          redactionMode: 'solid',
+          matrix: [1, 0, 0, 1, 20, 300],
+          width: 60,
+          height: 80,
+          color: '#000000',
+          fill: 'transparent',
+          strokeWidth: 0,
+          opacity: 1,
+        },
+        ...current.layers,
+      ],
+    });
+  });
   const beforeDoc = await doc();
   assert.deepEqual(
     beforeDoc.layers.map((layer) => layer.kind),
-    ['path', 'text']
+    ['redaction', 'path', 'text']
   );
   const beforeImage = await snapshot(),
     beforeBase = await baseImage(),
@@ -165,6 +188,8 @@ try {
   assert.deepEqual(flat.transparent, [250, 204, 21, 255]);
   assert.deepEqual(raw.corner, [0, 255, 255, 255], 'Base excludes the frame');
   assert.notDeepEqual(flat.corner, raw.corner);
+  assert.deepEqual(raw.redacted, [0, 0, 0, 255], 'Base applies redactions');
+  assert.deepEqual(flat.redacted, [0, 0, 0, 255]);
 
   // A failed AI result leaves the draft untouched.
   const failure = await page.evaluate(() =>
@@ -211,6 +236,7 @@ try {
   assert.deepEqual(after.stroke, flat.stroke, 'The stroke stays on top');
   assert.deepEqual(after.transparent, flat.transparent, 'Background remains');
   assert.deepEqual(after.corner, flat.corner, 'Frame remains');
+  assert.deepEqual(after.redacted, [0, 0, 0, 255], 'Redaction remains');
   assert.deepEqual(afterBase.stroke, [0, 255, 255, 255]);
   assert.deepEqual(afterBase.aiPatch, [0, 255, 0, 255]);
   const afterScreen = await waitForScreen(
@@ -237,7 +263,7 @@ try {
   await page.getByTestId('native-tool-text').click();
   await page.getByTestId('native-text-content').fill('After AI');
   await page.getByTestId('native-text-content').blur();
-  assert.equal((await doc()).layers[1].text, 'After AI');
+  assert.equal((await doc()).layers[2].text, 'After AI');
   await page.getByRole('application').focus();
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
   assert.equal(await snapshot(), afterImage, 'Text edit undone, AI kept');
@@ -247,11 +273,11 @@ try {
     .filter({ hasText: 'Drawing' })
     .click();
   const selectedPath = await page.evaluate(
-    () => window.localEditor.getDocument().layers[0].matrix
+    () => window.localEditor.getDocument().layers[1].matrix
   );
   await page.getByRole('application').focus();
   await page.keyboard.press('ArrowRight');
-  assert.notDeepEqual((await doc()).layers[0].matrix, selectedPath);
+  assert.notDeepEqual((await doc()).layers[1].matrix, selectedPath);
   await page.keyboard.press('Control+z');
   assert.equal(await snapshot(), afterImage, 'Stroke move undone, AI kept');
 
@@ -291,12 +317,13 @@ try {
   assert.deepEqual(reopened, {
     source: ['image/png', true],
     same: true,
-    layers: ['path', 'text'],
+    layers: ['redaction', 'path', 'text'],
   });
   assert.deepEqual(errors, []);
   console.info(
     JSON.stringify({
       baseExcludesLayersFrameBackground: true,
+      baseAppliesRedactions: true,
       failedReplacementKeepsDraft: true,
       replacementKeepsLayers: true,
       layersEditableAfterReplacement: true,

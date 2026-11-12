@@ -83,6 +83,27 @@ it('exports the base at document size without layers or document decoration', as
   expect(engine.getDocument()!.layers).toHaveLength(1);
 });
 
+it('applies visible redactions to the base so hidden content never leaves', async () => {
+  const { engine, layer } = await draft(),
+    doc = engine.getSnapshot().document!,
+    redaction = {
+      ...pathLayer([{ x: 0, y: 0 }]),
+      kind: 'redaction' as const,
+      width: 20,
+      height: 20,
+    },
+    hidden = { ...redaction, id: 'hidden', hidden: true };
+  engine.commit({ ...doc, layers: [redaction, layer, hidden] });
+  const base = JSON.parse(engine.getBaseImage()!) as ImageDocument;
+  expect(base.layers).toEqual([redaction]);
+  await engine.replaceBase(image(80, 60, 'ai'));
+  expect(engine.getSnapshot().document!.layers).toEqual([
+    redaction,
+    layer,
+    hidden,
+  ]);
+});
+
 it('replaces the base as one undoable edit and keeps layers editable', async () => {
   const { engine, original, layer, loader } = await draft(),
     changes: ImageEditorChange[] = [];

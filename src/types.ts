@@ -108,7 +108,8 @@ export interface ImageEditorInstance {
   getBlob(options?: ImageExportOptions): Promise<Blob>;
   /**
    * The photo with its crop, rotation, resize and adjustments at document size, without
-   * layers, frame, background or rounded corners. Defaults to PNG without metadata.
+   * layers, frame, background or rounded corners. Visible redactions are applied, so
+   * hidden content is never sent anywhere. Defaults to PNG without metadata.
    * Coordinates match the document, so a mask drawn over the document lines up.
    */
   getBaseImage(options?: ImageExportOptions): string | null;

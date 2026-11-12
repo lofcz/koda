@@ -111,11 +111,15 @@ async function readSourceExif(image: LoadedImage) {
     ? readJpegExif(new Uint8Array(await image.sourceBlob.arrayBuffer()))
     : null;
 }
-/** The pixels AI and other base edits replace: no layers, frame, background or corners. */
+/** The pixels AI and other base edits replace: no frame, background, corners or
+ * layers, except visible redactions, so hidden content never leaves the editor.
+ * Redactions also stay layers above the replacement. */
 function baseDocument(doc: ImageDocument): ImageDocument {
   return {
     ...doc,
-    layers: [],
+    layers: doc.layers.filter(
+      (layer) => layer.kind === 'redaction' && !layer.hidden
+    ),
     background: 'transparent',
     frame: { ...doc.frame, style: 'none' },
     cornerRadius: 0,
