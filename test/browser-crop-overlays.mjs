@@ -235,9 +235,11 @@ try {
   await page.getByTestId('native-crop-preset').click();
   await page.getByRole('option', { name: 'Wide', exact: true }).click();
   const wide = await cropRect();
+  // Sample 12 units in, like the other corner checks: the crop frame's soft
+  // shadow reaches a few pixels inside the edge, the circle mask would not.
   await waitOverlay(
-    wide.x + 4,
-    wide.y + 4,
+    wide.x + 12,
+    wide.y + 12,
     clear,
     'switching away from the profile preset restores the host overlay'
   );
