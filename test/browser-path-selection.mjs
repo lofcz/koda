@@ -71,8 +71,26 @@ try {
   const ids = () =>
     page.evaluate(() => window.localEditor.getSnapshot().selectedIds);
   const historyCount = () => page.evaluate(() => window.changes.length);
+  // Opening or closing the inspector refits the viewport on a later
+  // ResizeObserver tick (later in WebKit than in Chromium); map coordinates
+  // only once the artboard has stopped moving.
+  const artboard = async () => {
+    let box = await page.locator('.rie-artboard').boundingBox();
+    for (let i = 0; i < 30; i++) {
+      await page.evaluate(
+        () =>
+          new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve))
+          )
+      );
+      const next = await page.locator('.rie-artboard').boundingBox();
+      if (JSON.stringify(next) === JSON.stringify(box)) break;
+      box = next;
+    }
+    return box;
+  };
   const world = async (x, y) => {
-    const b = await page.locator('.rie-artboard').boundingBox(),
+    const b = await artboard(),
       d = await doc();
     return {
       x: b.x + (x * b.width) / d.width,
