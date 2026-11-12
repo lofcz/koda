@@ -232,7 +232,9 @@ export function nineSlice(
   image: Pick<FrameImage, 'slice' | 'repeat' | 'sourceWidth' | 'sourceHeight'>,
   natural: Size,
   width: number,
-  area: Size
+  area: Size,
+  /** Destination border per side; defaults to the slices scaled to `width`. */
+  insets?: SliceInsets
 ): (SlicePiece & { clip?: SlicePiece['target'] })[] {
   // Insets refer to sourceWidth/Height; follow a resized file proportionally.
   const kx = natural.width / image.sourceWidth,
@@ -243,7 +245,7 @@ export function nineSlice(
       bottom: image.slice.bottom * ky,
       left: image.slice.left * kx,
     },
-    d = frameImageInsets(image, width, area);
+    d = insets ?? frameImageInsets(image, width, area);
   const middle = {
       x: s.left,
       y: s.top,
@@ -368,7 +370,17 @@ export function paintImageFrame(
   area: Size
 ) {
   if (!frame.image || !image || !natural || frame.width <= 0) return;
-  for (const piece of nineSlice(frame.image, natural, frame.width, area)) {
+  // An outside frame paints exactly over the margins it added, which follow
+  // quarter turns and flips of the document.
+  const insets =
+    frame.placement === 'outside' && frame.margins ? frame.margins : undefined;
+  for (const piece of nineSlice(
+    frame.image,
+    natural,
+    frame.width,
+    area,
+    insets
+  )) {
     if (piece.clip) {
       ctx.save();
       ctx.beginPath();
@@ -386,8 +398,14 @@ export function paintImageFrame(
   }
 }
 
-/** Canvas added on each side when a frame sits outside the photo. */
+/** Canvas currently added on each side by an outside frame. */
 export function frameMargins(frame: Frame): SliceInsets {
+  if (frame.placement === 'outside' && frame.margins && frame.style !== 'none')
+    return frame.margins;
+  return definedMargins(frame);
+}
+/** Margins in upright orientation, derived from the frame definition alone. */
+function definedMargins(frame: Frame): SliceInsets {
   const none = { top: 0, right: 0, bottom: 0, left: 0 };
   if (
     frame.placement !== 'outside' ||
@@ -421,10 +439,19 @@ export function setFrame(
     height: number
   ) => ImageDocument
 ): ImageDocument {
-  const before = frameMargins(doc.frame),
-    after = frameMargins(frame);
-  let next = doc;
   const round = (n: number) => Math.round(n);
+  // Remove what the current frame actually added (it may have been rotated),
+  // then add the new frame's margins upright and record them on the frame.
+  const before = frameMargins(doc.frame),
+    defined = definedMargins(frame),
+    after = {
+      top: round(defined.top),
+      right: round(defined.right),
+      bottom: round(defined.bottom),
+      left: round(defined.left),
+    };
+  const { margins: _stale, ...definition } = frame;
+  let next = doc;
   if (before.top || before.right || before.bottom || before.left)
     next = transform(
       next,
@@ -441,5 +468,38 @@ export function setFrame(
       next.width + round(after.left) + round(after.right),
       next.height + round(after.top) + round(after.bottom)
     );
-  return { ...next, frame };
+  return {
+    ...next,
+    frame:
+      after.top || after.right || after.bottom || after.left
+        ? { ...definition, margins: after }
+        : definition,
+  };
+}
+/** Follow a quarter turn: clockwise moves the left margin to the top. */
+export function rotateMargins(
+  margins: SliceInsets,
+  clockwise: boolean
+): SliceInsets {
+  return clockwise
+    ? {
+        top: margins.left,
+        right: margins.top,
+        bottom: margins.right,
+        left: margins.bottom,
+      }
+    : {
+        top: margins.right,
+        right: margins.bottom,
+        bottom: margins.left,
+        left: margins.top,
+      };
+}
+export function flipMargins(
+  margins: SliceInsets,
+  horizontal: boolean
+): SliceInsets {
+  return horizontal
+    ? { ...margins, left: margins.right, right: margins.left }
+    : { ...margins, top: margins.bottom, bottom: margins.top };
 }

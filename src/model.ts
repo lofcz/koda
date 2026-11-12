@@ -2,8 +2,13 @@ import { normalizeTextRuns } from './textModel';
 import type { TextRun } from './textModel';
 import { parseBackgroundImage } from './backgrounds';
 import type { BackgroundImage } from './backgrounds';
-import { parseFrameImage, setFrame } from './frames';
-import type { FrameImage } from './frames';
+import {
+  flipMargins,
+  parseFrameImage,
+  rotateMargins,
+  setFrame,
+} from './frames';
+import type { FrameImage, SliceInsets } from './frames';
 export type { TextRun, TextStyle, ResolvedTextStyle } from './textModel';
 export type { BackgroundImage, BackgroundFit } from './backgrounds';
 export type { FrameImage, FrameRepeat, SliceInsets } from './frames';
@@ -112,6 +117,12 @@ export type Frame = {
   placement?: 'inside' | 'outside';
   /** Required when style is `image`; embedded so documents restore without the host catalog. */
   image?: FrameImage;
+  /**
+   * Outside placement only: canvas pixels the frame added per side, kept in
+   * document orientation through quarter turns, flips and resizes so the
+   * frame paints over them and removing it restores the photo exactly.
+   */
+  margins?: SliceInsets;
 };
 export type ImageDocument = {
   width: number;
@@ -238,9 +249,25 @@ export function resizeDocument(
     size.height
   );
   const factor = Math.min(size.width / doc.width, size.height / doc.height);
+  const sx = size.width / doc.width,
+    sy = size.height / doc.height,
+    margins = doc.frame.margins;
   return {
     ...resized,
-    frame: { ...doc.frame, width: doc.frame.width * factor },
+    frame: {
+      ...doc.frame,
+      width: doc.frame.width * factor,
+      ...(margins
+        ? {
+            margins: {
+              top: margins.top * sy,
+              right: margins.right * sx,
+              bottom: margins.bottom * sy,
+              left: margins.left * sx,
+            },
+          }
+        : {}),
+    },
     cornerRadius: doc.cornerRadius * factor,
     ...(doc.backgroundImage
       ? {
@@ -267,24 +294,39 @@ export function cropDocument(doc: ImageDocument, rect: Rect): ImageDocument {
     return doc;
   return transformDocument(doc, translate(-x, -y), width, height);
 }
+/** Outside-frame margins follow the document's own quarter turns and flips. */
+function withMargins(
+  doc: ImageDocument,
+  map: (margins: SliceInsets) => SliceInsets
+): ImageDocument {
+  return doc.frame.margins
+    ? { ...doc, frame: { ...doc.frame, margins: map(doc.frame.margins) } }
+    : doc;
+}
 export function rotateDocument(
   doc: ImageDocument,
   clockwise: boolean
 ): ImageDocument {
-  return transformDocument(
-    doc,
-    clockwise ? [0, 1, -1, 0, doc.height, 0] : [0, -1, 1, 0, 0, doc.width],
-    doc.height,
-    doc.width
+  return withMargins(
+    transformDocument(
+      doc,
+      clockwise ? [0, 1, -1, 0, doc.height, 0] : [0, -1, 1, 0, 0, doc.width],
+      doc.height,
+      doc.width
+    ),
+    (margins) => rotateMargins(margins, clockwise)
   );
 }
 export function flipDocument(
   doc: ImageDocument,
   horizontal: boolean
 ): ImageDocument {
-  return transformDocument(
-    doc,
-    horizontal ? [-1, 0, 0, 1, doc.width, 0] : [1, 0, 0, -1, 0, doc.height]
+  return withMargins(
+    transformDocument(
+      doc,
+      horizontal ? [-1, 0, 0, 1, doc.width, 0] : [1, 0, 0, -1, 0, doc.height]
+    ),
+    (margins) => flipMargins(margins, horizontal)
   );
 }
 /** Rotate the entire editable composition around its center, retaining every layer. */
@@ -728,6 +770,15 @@ export function parseDocument(input: unknown): ImageDocument {
     result.frame.image = parseFrameImage(frame.image);
   else if (result.frame.style === 'image')
     throw new Error('Invalid frame image');
+  if (frame.margins !== undefined) {
+    const margins = object(frame.margins);
+    result.frame.margins = {
+      top: number(margins.top, 0, MAX_DIMENSION),
+      right: number(margins.right, 0, MAX_DIMENSION),
+      bottom: number(margins.bottom, 0, MAX_DIMENSION),
+      left: number(margins.left, 0, MAX_DIMENSION),
+    };
+  }
   if (!Array.isArray(doc.layers) || doc.layers.length > 10000)
     throw new Error('Invalid document layers');
   const ids = new Set<string>();

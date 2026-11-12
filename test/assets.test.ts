@@ -2,6 +2,8 @@ import { vi } from 'vitest';
 import {
   applyFrame,
   createDocument,
+  flipDocument,
+  rotateDocument,
   DocumentHistory,
   ImageDocument,
   parseDocument,
@@ -321,6 +323,79 @@ describe('frame placement', () => {
       width: 16,
     });
     expect([none.width, none.height]).toEqual([200, 100]);
+  });
+  it('outside margins follow quarter turns and flips so removal restores the photo', () => {
+    const photo = createDocument(200, 100),
+      polaroid = {
+        style: 'polaroid' as const,
+        color: '#000',
+        width: 10,
+        placement: 'outside' as const,
+      },
+      none = { style: 'none' as const, color: '#fff', width: 16 };
+    const framed = applyFrame(photo, polaroid);
+    expect(framed.frame.margins).toEqual({
+      top: 10,
+      right: 10,
+      bottom: 30,
+      left: 10,
+    });
+    const clean = (doc: ImageDocument) => doc.imageMatrix.map((n) => n + 0);
+    for (const [turn, margins] of [
+      [
+        (d: ImageDocument) => flipDocument(rotateDocument(d, true), true),
+        { top: 10, right: 30, bottom: 10, left: 10 },
+      ],
+      [
+        (d: ImageDocument) => flipDocument(rotateDocument(d, false), false),
+        { top: 10, right: 30, bottom: 10, left: 10 },
+      ],
+      [
+        (d: ImageDocument) => rotateDocument(rotateDocument(d, true), true),
+        { top: 30, right: 10, bottom: 10, left: 10 },
+      ],
+    ] as const) {
+      const turned = turn(framed),
+        expected = turn(photo);
+      expect([turned.width, turned.height]).toEqual([
+        expected.width + margins.left + margins.right,
+        expected.height + margins.top + margins.bottom,
+      ]);
+      expect(turned.frame.margins).toEqual(margins);
+      // Stored margins survive persistence.
+      expect(parseDocument(JSON.stringify(turned)).frame.margins).toEqual(
+        margins
+      );
+      const removed = applyFrame(turned, none);
+      expect([removed.width, removed.height]).toEqual([
+        expected.width,
+        expected.height,
+      ]);
+      expect(clean(removed)).toEqual(clean(expected));
+      expect('margins' in removed.frame).toBe(false);
+      // Changing the width removes the rotated margins and adds upright ones.
+      const wider = applyFrame(turned, { ...turned.frame, width: 20 });
+      expect([wider.width, wider.height]).toEqual([
+        expected.width + 40,
+        expected.height + 80,
+      ]);
+    }
+    const resized = resizeDocument(framed, 110, 70);
+    expect(resized.frame.margins).toEqual({
+      top: 5,
+      right: 5,
+      bottom: 15,
+      left: 5,
+    });
+    expect(() =>
+      parseDocument({
+        ...framed,
+        frame: {
+          ...framed.frame,
+          margins: { top: -1, right: 0, bottom: 0, left: 0 },
+        },
+      })
+    ).toThrow();
   });
   it('inside frames never change geometry', () => {
     const framed = applyFrame(base, { style: 'mat', color: '#000', width: 30 });

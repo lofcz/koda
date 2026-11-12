@@ -659,24 +659,30 @@ function paintFrame(
   ) {
     const bottom =
       frame.style === 'polaroid' ? Math.min(doc.height / 2, width * 3) : width;
+    // An outside frame covers exactly the margins it added, in their current
+    // orientation, so a rotated Polaroid never paints over the photo.
+    const inner =
+      frame.placement === 'outside' && frame.margins
+        ? frame.margins
+        : { top: width, right: width, bottom, left: width };
     // Draw the border as a single even-odd path so translucent frame colors do not double at corners.
     ctx.beginPath();
     ctx.rect(0, 0, doc.width, doc.height);
     ctx.rect(
-      width,
-      width,
-      Math.max(0, doc.width - 2 * width),
-      Math.max(0, doc.height - width - bottom)
+      inner.left,
+      inner.top,
+      Math.max(0, doc.width - inner.left - inner.right),
+      Math.max(0, doc.height - inner.top - inner.bottom)
     );
     ctx.fill('evenodd');
     if (frame.style === 'mat') {
       ctx.strokeStyle = 'rgba(0,0,0,0.24)';
       ctx.lineWidth = Math.max(1, width / 18);
       ctx.strokeRect(
-        width,
-        width,
-        doc.width - 2 * width,
-        doc.height - 2 * width
+        inner.left,
+        inner.top,
+        doc.width - inner.left - inner.right,
+        doc.height - inner.top - inner.bottom
       );
     }
   } else if (frame.style === 'bevel') {

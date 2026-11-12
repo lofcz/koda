@@ -698,6 +698,108 @@ try {
       back: [260, 160, 1, 0, 0, 1, -20, -20],
     });
 
+    // Outside Polaroid, then a quarter turn and a flip: the frame paints only
+    // over its rotated margins, and removing it restores the turned photo.
+    const turned = await page.evaluate(async (root) => {
+      const model = await import(`/@fs${root}/src/model.ts`),
+        render = await import(`/@fs${root}/src/render.ts`);
+      const source = window.localEditor.getSource(),
+        photo = model.createDocument(300, 200);
+      const results = {};
+      for (const [name, turn] of [
+        [
+          'cw+flipH',
+          (d) => model.flipDocument(model.rotateDocument(d, true), true),
+        ],
+        [
+          'ccw+flipV',
+          (d) => model.flipDocument(model.rotateDocument(d, false), false),
+        ],
+      ]) {
+        const framed = turn(
+          model.applyFrame(photo, {
+            style: 'polaroid',
+            color: '#00ff00',
+            width: 10,
+            placement: 'outside',
+          })
+        );
+        const removed = model.applyFrame(framed, {
+          style: 'none',
+          color: '#ffffff',
+          width: 16,
+        });
+        const expected = turn(photo);
+        const pixels = (doc) => {
+          const canvas = render.exportCanvas(doc, source);
+          return canvas
+            .getContext('2d')
+            .getImageData(0, 0, canvas.width, canvas.height);
+        };
+        const a = pixels(removed),
+          b = pixels(expected),
+          f = pixels(framed),
+          m = framed.frame.margins;
+        let removedDiff =
+          a.width === b.width && a.height === b.height ? 0 : 255;
+        for (let i = 0; !removedDiff && i < a.data.length; i++)
+          removedDiff = Math.max(removedDiff, Math.abs(a.data[i] - b.data[i]));
+        // The photo inside the frame is untouched; every margin pixel is frame.
+        let photoDiff = 0,
+          marginMiss = 0;
+        for (let y = 0; y < f.height; y++)
+          for (let x = 0; x < f.width; x++) {
+            const i = (y * f.width + x) * 4,
+              inside =
+                x >= m.left &&
+                y >= m.top &&
+                x < f.width - m.right &&
+                y < f.height - m.bottom;
+            if (inside) {
+              const j = ((y - m.top) * b.width + (x - m.left)) * 4;
+              for (let c = 0; c < 4; c++)
+                photoDiff = Math.max(
+                  photoDiff,
+                  Math.abs(f.data[i + c] - b.data[j + c])
+                );
+            } else if (
+              f.data[i] !== 0 ||
+              f.data[i + 1] !== 255 ||
+              f.data[i + 2] !== 0 ||
+              f.data[i + 3] !== 255
+            )
+              marginMiss++;
+          }
+        results[name] = {
+          size: [removed.width, removed.height],
+          expected: [expected.width, expected.height],
+          margins: m,
+          removedDiff,
+          photoDiff,
+          marginMiss,
+        };
+      }
+      return results;
+    }, root);
+    assert.deepEqual(turned, {
+      'cw+flipH': {
+        size: [200, 300],
+        expected: [200, 300],
+        margins: { top: 10, right: 30, bottom: 10, left: 10 },
+        removedDiff: 0,
+        photoDiff: 0,
+        marginMiss: 0,
+      },
+      'ccw+flipV': {
+        size: [200, 300],
+        expected: [200, 300],
+        margins: { top: 10, right: 30, bottom: 10, left: 10 },
+        removedDiff: 0,
+        photoDiff: 0,
+        marginMiss: 0,
+      },
+    });
+
     // UI: host frames listed with real previews next to the vector frames.
     await page.evaluate(() =>
       window.localEditor.restoreDocument(window.baseDocument())
