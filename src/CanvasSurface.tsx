@@ -258,8 +258,12 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       upper = useRef<HTMLCanvasElement>(null),
       textInput = useRef<RichTextInputHandle | null>(null);
     const [size, setSize] = useState({ width: 1, height: 1 }),
-      [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
+      [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 }),
+      // What is painted. Equals `view` except while a refit or zoom glides
+      // toward it; geometry, hit-testing and the DOM always use `view`.
+      [shown, setShown] = useState<View>(view);
     const viewRef = useRef(view),
+      origin = useRef({ x: 0, y: 0 }),
       fitted = useRef(true),
       gesture = useRef<Gesture | null>(null),
       pointers = useRef(new Map<number, Point>()),
@@ -375,11 +379,55 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         state.options
       );
     }, [engine, previewCropImage]);
-    const updateView = useCallback((next: View, isFit = false) => {
-      fitted.current = isFit;
-      viewRef.current = next;
-      setView(next);
-    }, []);
+    const shownRef = useRef(view),
+      glide = useRef(0);
+    useEffect(() => () => cancelAnimationFrame(glide.current), []);
+    /** Set the logical view. With a duration the painted view eases toward
+     * it from `from` (default: what is on screen now); gestures pass none. */
+    const updateView = useCallback(
+      (next: View, isFit = false, duration = 0, from?: View) => {
+        fitted.current = isFit;
+        viewRef.current = next;
+        setView(next);
+        cancelAnimationFrame(glide.current);
+        const start = from ?? shownRef.current;
+        if (
+          !duration ||
+          window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ||
+          (Math.abs(start.zoom - next.zoom) < 1e-4 &&
+            Math.abs(start.x - next.x) < 0.5 &&
+            Math.abs(start.y - next.y) < 0.5)
+        ) {
+          shownRef.current = next;
+          setShown(next);
+          return;
+        }
+        const begin = performance.now();
+        const step = (now: number) => {
+          const t = Math.min(1, (now - begin) / duration),
+            e = 1 - Math.pow(1 - t, 3),
+            // Interpolate zoom geometrically so scale changes feel even.
+            zoom = start.zoom * Math.pow(next.zoom / start.zoom, e),
+            k =
+              Math.abs(next.zoom - start.zoom) > 1e-6
+                ? (zoom - start.zoom) / (next.zoom - start.zoom)
+                : e;
+          const frame =
+            t >= 1
+              ? next
+              : {
+                  zoom,
+                  x: start.x + (next.x - start.x) * k,
+                  y: start.y + (next.y - start.y) * k,
+                };
+          shownRef.current = frame;
+          setShown(frame);
+          if (t < 1) glide.current = requestAnimationFrame(step);
+        };
+        glide.current = requestAnimationFrame(step);
+      },
+      []
+    );
     useEffect(() => {
       onViewChange?.({ zoom: view.zoom, fitted: fitted.current });
     }, [view, onViewChange]);
@@ -429,7 +477,9 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             viewRef.current,
             viewRef.current.zoom * Math.exp(-event.deltaY * 0.002),
             p
-          )
+          ),
+          false,
+          120
         );
       };
       node.addEventListener('wheel', wheel, { passive: false });
@@ -440,6 +490,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       if (!node) return;
       const measure = () => {
         const r = node.getBoundingClientRect();
+        origin.current = { x: r.left, y: r.top };
         setSize((current) =>
           r.width === current.width && r.height === current.height
             ? current
@@ -452,14 +503,16 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       return () => observer.disconnect();
     }, []);
     const fit = useCallback(
-      () =>
+      (duration = 0, from?: View) =>
         updateView(
           fitView(
             { width: doc.width, height: doc.height },
             size.width,
             size.height
           ),
-          true
+          true,
+          duration,
+          from
         ),
       [doc.width, doc.height, size.width, size.height, updateView]
     );
@@ -469,27 +522,43 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       documentWidth: 0,
       documentHeight: 0,
       image,
+      origin: { x: 0, y: 0 },
     });
     useLayoutEffect(() => {
-      const previous = previousFrame.current;
-      if (
-        fitted.current ||
-        previous.image !== image ||
-        previous.documentWidth !== doc.width ||
-        previous.documentHeight !== doc.height
-      )
-        fit();
-      else if (previous.width !== size.width || previous.height !== size.height)
-        updateView({
-          ...viewRef.current,
-          x: viewRef.current.x + (size.width - previous.width) / 2,
-          y: viewRef.current.y + (size.height - previous.height) / 2,
-        });
+      const previous = previousFrame.current,
+        sameContent =
+          previous.image === image &&
+          previous.documentWidth === doc.width &&
+          previous.documentHeight === doc.height,
+        resized =
+          previous.width !== size.width || previous.height !== size.height;
+      // A panel opening or closing moves and resizes the canvas host. Keep the
+      // image where it was on screen, then glide it to its new place.
+      const moved = {
+          ...shownRef.current,
+          x: shownRef.current.x + previous.origin.x - origin.current.x,
+          y: shownRef.current.y + previous.origin.y - origin.current.y,
+        },
+        glides = sameContent && resized && previous.width > 1;
+      if (fitted.current || !sameContent)
+        fit(glides ? 240 : 0, glides ? moved : undefined);
+      else if (resized)
+        updateView(
+          {
+            ...viewRef.current,
+            x: viewRef.current.x + (size.width - previous.width) / 2,
+            y: viewRef.current.y + (size.height - previous.height) / 2,
+          },
+          false,
+          glides ? 240 : 0,
+          glides ? moved : undefined
+        );
       previousFrame.current = {
         ...size,
         documentWidth: doc.width,
         documentHeight: doc.height,
         image,
+        origin: origin.current,
       };
     }, [fit, image, doc.width, doc.height, size, updateView]);
     const finishText = useCallback(
@@ -696,7 +765,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     useImperativeHandle(
       ref,
       () => ({
-        fit,
+        fit: () => fit(220),
         cancel,
         editText: beginText,
         finishText,
@@ -764,14 +833,18 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             zoomAt(viewRef.current, 1, {
               x: size.width / 2,
               y: size.height / 2,
-            })
+            }),
+            false,
+            200
           ),
         zoom: (factor) =>
           updateView(
             zoomAt(viewRef.current, viewRef.current.zoom * factor, {
               x: size.width / 2,
               y: size.height / 2,
-            })
+            }),
+            false,
+            180
           ),
       }),
       [
@@ -868,7 +941,8 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     }, [cancel, engine, tool]);
 
     useLayoutEffect(() => {
-      const canvas = lower.current;
+      const canvas = lower.current,
+        view = shown;
       if (!canvas || !image) return;
       const dpr = Math.min(3, window.devicePixelRatio || 1);
       const width = Math.round(size.width * dpr),
@@ -921,7 +995,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     }, [
       doc,
       image,
-      view,
+      shown,
       size,
       compare,
       editing,
@@ -933,7 +1007,8 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
     ]);
 
     useLayoutEffect(() => {
-      const overlay = upper.current;
+      const overlay = upper.current,
+        view = shown;
       if (!overlay) return;
       const dpr = Math.min(3, window.devicePixelRatio || 1),
         width = Math.round(size.width * dpr),
@@ -957,13 +1032,37 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         );
         if (closed) ui.closePath();
       };
+      // Chrome reads on any photo: white knobs lifted by a soft shadow, accent rims.
+      const lifted = (paint: () => void, blur = 4, alpha = 0.32) => {
+        ui.save();
+        ui.shadowColor = `rgba(8,14,24,${alpha})`;
+        ui.shadowBlur = blur;
+        ui.shadowOffsetY = 1;
+        paint();
+        ui.restore();
+      };
       const handle = (p: Point, radius = 5) => {
-        ui.fillStyle = '#fff';
+        const r = radius + 0.5;
+        lifted(() => {
+          ui.fillStyle = '#fff';
+          ui.beginPath();
+          ui.arc(p.x, p.y, r, 0, Math.PI * 2);
+          ui.fill();
+        });
         ui.strokeStyle = accent;
         ui.lineWidth = 1.5;
         ui.beginPath();
-        ui.arc(p.x, p.y, radius, 0, Math.PI * 2);
-        ui.fill();
+        ui.arc(p.x, p.y, r - 0.75, 0, Math.PI * 2);
+        ui.stroke();
+      };
+      // A faint dark halo under thin accent outlines keeps them visible on bright images.
+      const outline = (points: Point[], closed = true) => {
+        path(points, closed);
+        ui.save();
+        ui.strokeStyle = 'rgba(8,14,24,.22)';
+        ui.lineWidth = 3.5;
+        ui.stroke();
+        ui.restore();
         ui.stroke();
       };
       if (tool === 'crop') {
@@ -973,8 +1072,10 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
         const area = { x: a.x, y: a.y, width: w, height: h };
         paintCropMask(ui, size, area, cropOptions);
         clipCropGuides(ui, area, cropOptions);
-        ui.strokeStyle = 'rgba(255,255,255,.48)';
+        ui.strokeStyle = 'rgba(255,255,255,.42)';
         ui.lineWidth = 1;
+        ui.shadowColor = 'rgba(8,14,24,.35)';
+        ui.shadowBlur = 2;
         const guides = cropOptions.guides ?? 'thirds';
         const stops =
           typeof guides === 'object'
@@ -1018,26 +1119,38 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           ui.stroke();
         }
         ui.restore();
-        ui.strokeStyle = '#fff';
-        ui.lineWidth = 1.5;
-        ui.strokeRect(a.x, a.y, w, h);
+        lifted(
+          () => {
+            ui.strokeStyle = 'rgba(255,255,255,.92)';
+            ui.lineWidth = 1.25;
+            ui.strokeRect(a.x, a.y, w, h);
+          },
+          3,
+          0.4
+        );
         paintCropOverlay(ui, area, crop, cropOptions, cropOutput);
         for (const { handle: name, point } of cropOptions.handleStyle ===
         'invisible'
           ? []
           : cropHandles(crop)) {
           const p = screen(point, view);
-          ui.lineWidth = 3;
+          ui.lineWidth = 3.5;
+          ui.lineCap = 'round';
+          ui.lineJoin = 'round';
+          ui.strokeStyle = '#fff';
           ui.beginPath();
           if (name.length === 2) {
             if (cropOptions.handleStyle !== 'hook') {
-              ui.fillStyle = '#fff';
-              ui.strokeStyle = '#1f2937';
-              ui.lineWidth = 1;
-              ui.arc(p.x, p.y, 5, 0, Math.PI * 2);
-              ui.fill();
-              ui.stroke();
-              ui.strokeStyle = '#fff';
+              lifted(
+                () => {
+                  ui.fillStyle = '#fff';
+                  ui.beginPath();
+                  ui.arc(p.x, p.y, 6.5, 0, Math.PI * 2);
+                  ui.fill();
+                },
+                5,
+                0.45
+              );
               continue;
             }
             const dx = name.includes('w') ? 1 : -1,
@@ -1052,8 +1165,10 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             ui.moveTo(p.x, p.y - Math.min(10, h / 6));
             ui.lineTo(p.x, p.y + Math.min(10, h / 6));
           }
-          ui.stroke();
+          lifted(() => ui.stroke(), 4, 0.45);
         }
+        ui.lineCap = 'butt';
+        ui.lineJoin = 'miter';
         if (cropOptions.showSize !== false) {
           const output = cropOutputSize(crop, cropOptions);
           const label = `${output.width} × ${output.height}`;
@@ -1070,10 +1185,16 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
               a.y + h + 32 < size.height
                 ? a.y + h + 8
                 : Math.max(4, a.y + h - 32);
-          ui.fillStyle = 'rgba(15,23,42,.82)';
-          ui.beginPath();
-          ui.roundRect(labelX, labelY, labelWidth, 24, 6);
-          ui.fill();
+          lifted(
+            () => {
+              ui.fillStyle = 'rgba(15,20,28,.78)';
+              ui.beginPath();
+              ui.roundRect(labelX, labelY, labelWidth, 24, 12);
+              ui.fill();
+            },
+            8,
+            0.3
+          );
           ui.fillStyle = '#fff';
           ui.textBaseline = 'middle';
           ui.fillText(label, labelX + 9, labelY + 12);
@@ -1113,7 +1234,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           );
           const corners = layerCorners(layer).map((p) => screen(p, view));
           ui.strokeStyle = accent;
-          ui.lineWidth = 1.5;
+          ui.lineWidth = 1.25;
           if (layer.id === editingPath && layer.kind === 'path') {
             const nodes = pathNodes(layer).map((point) => screen(point, view));
             ui.setLineDash([4, 3]);
@@ -1137,18 +1258,19 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
             });
           } else if (layer.kind === 'line' || layer.kind === 'arrow') {
             const ends = lineEndpoints(layer).map((p) => screen(p, view));
-            path(ends, false);
-            ui.stroke();
+            outline(ends, false);
             if (allowed.endpoint) ends.forEach((p) => handle(p, 6));
           } else {
-            path(corners);
-            ui.stroke();
+            outline(corners);
             if (allowed.rotate) {
               const r = rotationHandle(corners),
                 top = midpoint(corners[0], corners[1]);
-              path([top, r], false);
-              ui.stroke();
-              handle(r);
+              outline([top, r], false);
+              handle(r, 6);
+              ui.fillStyle = accent;
+              ui.beginPath();
+              ui.arc(r.x, r.y, 2, 0, Math.PI * 2);
+              ui.fill();
             }
             if (allowed.resize) {
               corners.forEach((p) => handle(p));
@@ -1233,7 +1355,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
       }
     }, [
       doc,
-      view,
+      shown,
       size,
       selected,
       selection,
@@ -2434,6 +2556,13 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
           },
         }
       : null;
+    /** Box visuals follow the painted view while it glides; layout keeps the logical box. */
+    const glideStyle = (x: number, y: number) =>
+      shown === view
+        ? undefined
+        : ({
+            '--rie-glide': `translate(${shown.x + x * shown.zoom - (view.x + x * view.zoom)}px,${shown.y + y * shown.zoom - (view.y + y * view.zoom)}px) scale(${shown.zoom / view.zoom})`,
+          } as React.CSSProperties);
     return (
       <div className="rie-canvas-wrap">
         <div
@@ -2506,6 +2635,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
               top: view.y,
               width: doc.width * view.zoom,
               height: doc.height * view.zoom,
+              ...glideStyle(0, 0),
             }}
           />
           {tool === 'crop' && !compare ? (
@@ -2516,6 +2646,7 @@ export const CanvasSurface = forwardRef<SurfaceActions, Props>(
                 top: view.y + crop.y * view.zoom,
                 width: crop.width * view.zoom,
                 height: crop.height * view.zoom,
+                ...glideStyle(crop.x, crop.y),
               }}
             />
           ) : null}

@@ -1,5 +1,18 @@
 import { useId, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { Icon } from './icons';
+
+/** Track fill for a range input: from zero for two-sided ranges, else from the minimum. */
+export function rangeFill(min: number, max: number, value: number) {
+  const span = max - min || 1,
+    at = (n: number) =>
+      `${(Math.max(0, Math.min(1, (n - min) / span)) * 100).toFixed(2)}%`,
+    origin = min < 0 && max > 0 ? 0 : min;
+  return {
+    '--rie-from': at(Math.min(origin, value)),
+    '--rie-to': at(Math.max(origin, value)),
+  } as CSSProperties;
+}
 
 const MINUS = '−';
 
@@ -118,6 +131,7 @@ export function CropStraighten({
         max={range}
         step={0.5}
         value={value}
+        style={rangeFill(-range, range, value)}
         aria-labelledby={`${id}-label`}
         aria-valuetext={`${shown}°`}
         data-testid={testId}
