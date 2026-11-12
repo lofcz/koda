@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { launchBrowser } from './browser-env.mjs';
 
 const port = Number(process.env.EDITOR_TEXT_UI_PORT ?? 4241);
 const base = `http://127.0.0.1:${port}`;
@@ -42,10 +42,7 @@ try {
     if (i === 119) throw new Error(logs);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.CHROMIUM_PATH,
-  });
+  browser = await launchBrowser();
   const page = await browser.newPage({
     viewport: { width: 1120, height: 800 },
   });

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { createTouch, launchBrowser } from './browser-env.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '');
 const port = Number(process.env.EDITOR_CROP_PORT ?? 4246);
@@ -52,10 +52,7 @@ try {
     if (i === 119) throw Error(log);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.CHROMIUM_PATH,
-  });
+  browser = await launchBrowser();
   page = await browser.newPage({
     viewport: { width: 1100, height: 850 },
     hasTouch: true,
@@ -399,7 +396,10 @@ try {
   close(region.y + region.height / 2, 90, 0.001);
   await page.getByTestId('native-crop-apply').click();
   next = await doc();
-  close(next.imageMatrix[4], 90);
+  // Apply rounds the crop to whole output pixels and scales the source with
+  // it. Firefox reports integer pointer coordinates, so its dragged width can
+  // be fractional; Chromium's exact -100 px drag keeps the scale at 1.
+  close(next.imageMatrix[4], (90 * next.width) / region.width);
   assert(next.imageMatrix[5] > 0);
 
   // Touch promotion and demotion preserve one pending crop and roll back the whole gesture.
@@ -414,7 +414,7 @@ try {
   await page.getByTestId('native-crop-zoom-in').click();
   const touchBase = await doc(),
     touchChanges = await changes();
-  const cdp = await page.context().newCDPSession(page);
+  const touchInput = await createTouch(page);
   // Chromium aligns touch pointermove with animation frames, so a CDP touch
   // can resolve before its pointer event is handled. Wait a bounded number of
   // frames for the expected state; the assertion that follows still decides.
@@ -422,8 +422,7 @@ try {
     for (let i = 0; i < 60 && !(await check()); i++)
       await page.evaluate(() => new Promise(requestAnimationFrame));
   };
-  const touch = (type, points) =>
-    cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points });
+  const touch = (type, points) => touchInput.send(type, points);
   const p = { ...(await world(230, 190)), id: 1 },
     q = { ...(await world(370, 210)), id: 2 };
   await touch('touchStart', [p]);
@@ -453,7 +452,7 @@ try {
   );
   assert.deepEqual(await doc(), touchBase);
   assert.equal(await changes(), touchChanges);
-  await cdp.detach();
+  await touchInput.detach();
   assert.equal(
     await page.evaluate(() => document.documentElement.scrollWidth <= 390),
     true

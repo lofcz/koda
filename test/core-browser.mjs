@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+import { launchBrowser } from './browser-env.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = Number(process.env.EDITOR_CORE_PORT ?? 4199);
@@ -33,10 +33,7 @@ try {
       throw new Error(serverLog || 'Core test server did not start');
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.CHROMIUM_PATH,
-  });
+  browser = await launchBrowser();
   const page = await browser.newPage();
   await page.route('**/core-check.html', (route) =>
     route.fulfill({
@@ -187,6 +184,13 @@ try {
     check(
       pixel(canvas, 10, 10)[0] > 80 && pixel(canvas, 10, 10)[0] < 180,
       'Pixelation samples underlying photo'
+    );
+    // A whole 8x8 checkerboard block averages to mid grey on every engine,
+    // independent of the browser's downscaling filter.
+    check(
+      Math.abs(pixel(canvas, 10, 10)[0] - 127.5) <= 1 &&
+        pixel(canvas, 10, 10)[3] === 255,
+      'Pixelation is the mean of every pixel in its block'
     );
     equal(
       pixel(canvas, 2, 2),
