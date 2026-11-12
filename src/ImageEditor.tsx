@@ -11,6 +11,7 @@ import { EditorUI } from './EditorUI';
 import { translator } from './locale';
 import { stableKey } from './stableKey';
 import { styles } from './styles';
+import { assetStyles } from './assetStyles';
 import type { ImageEditorProps, ImageEditorRef } from './types';
 
 function ImageEditorInner(
@@ -139,7 +140,7 @@ function ImageEditorInner(
           data-editor-engine="local-canvas"
           data-scheme={state.options.theme ?? 'light'}
         >
-          <style>{styles}</style>
+          <style>{styles + assetStyles}</style>
           {state.phase !== 'destroyed' ? (
             <EditorUI
               key={state.imageRevision}
