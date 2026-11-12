@@ -24,6 +24,18 @@ export type {
   ResolvedTextStyle,
 } from './model';
 export {
+  LAYER_RIGHTS,
+  parseLayerRights,
+  parseLayerRightsDefaults,
+  resolveLayerRights,
+} from './rights';
+export type {
+  LayerRight,
+  LayerRights,
+  LayerRightsDefaults,
+  ResolvedLayerRights,
+} from './rights';
+export {
   normalizeTextRuns,
   textContent,
   resolveTextStyle,

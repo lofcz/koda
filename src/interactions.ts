@@ -173,11 +173,17 @@ export function snapMove(
   delta: Point,
   threshold: number,
   axis?: 'x' | 'y',
-  excludedIds: readonly string[] = [layer.id]
+  excludedIds: readonly string[] = [layer.id],
+  isTarget: (layer: Layer) => boolean = () => true
 ): { delta: Point; guides: SnapGuide[] } {
   const bounds = layerBounds(layer);
   const peers = doc.layers.filter(
-    (p) => !excludedIds.includes(p.id) && !p.hidden && !p.erase && p.opacity > 0
+    (p) =>
+      !excludedIds.includes(p.id) &&
+      !p.hidden &&
+      !p.erase &&
+      p.opacity > 0 &&
+      isTarget(p)
   );
   const targets = {
     x: [doc.width / 2, 0, doc.width],
@@ -345,13 +351,16 @@ export function transformLayers(
 
 export function duplicateLayers(
   doc: ImageDocument,
-  ids: readonly string[]
+  ids: readonly string[],
+  canDuplicate: (layer: Layer) => boolean = () => true
 ): { document: ImageDocument; ids: string[] } {
-  const copies = selectedLayers(doc, ids).map((layer) => ({
-    ...layer,
-    id: crypto.randomUUID(),
-    matrix: multiply(translate(12, 12), layer.matrix),
-  }));
+  const copies = selectedLayers(doc, ids)
+    .filter(canDuplicate)
+    .map((layer) => ({
+      ...layer,
+      id: crypto.randomUUID(),
+      matrix: multiply(translate(12, 12), layer.matrix),
+    }));
   return {
     document: copies.length
       ? { ...doc, layers: [...doc.layers, ...copies] }
@@ -362,10 +371,12 @@ export function duplicateLayers(
 
 export type Alignment =
   'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom';
+/** Members that cannot move still define the selection bounds they are aligned to. */
 export function alignLayers(
   doc: ImageDocument,
   ids: readonly string[],
-  alignment: Alignment
+  alignment: Alignment,
+  canMove: (layer: Layer) => boolean = () => true
 ): ImageDocument {
   const layers = selectedLayers(doc, ids),
     bounds =
@@ -381,7 +392,8 @@ export function alignLayers(
       : ['right', 'bottom'].includes(alignment)
         ? 1
         : 0;
-  const selected = new Set(layers.map((layer) => layer.id));
+  const selected = new Set(layers.filter(canMove).map((layer) => layer.id));
+  if (!selected.size) return doc;
   return {
     ...doc,
     layers: doc.layers.map((layer) => {
@@ -403,14 +415,17 @@ export function alignLayers(
   };
 }
 
+/** Only members that can move take part; fixed members neither move nor set the spacing. */
 export function distributeLayers(
   doc: ImageDocument,
   ids: readonly string[],
-  direction: 'horizontal' | 'vertical'
+  direction: 'horizontal' | 'vertical',
+  canMove: (layer: Layer) => boolean = () => true
 ): ImageDocument {
   const axis = direction === 'horizontal' ? 'x' : 'y',
     size = direction === 'horizontal' ? 'width' : 'height',
     layers = selectedLayers(doc, ids)
+      .filter(canMove)
       .map((layer) => ({ layer, bounds: layerBounds(layer) }))
       .sort((a, b) => a.bounds[axis] - b.bounds[axis]);
   if (layers.length < 3) return doc;

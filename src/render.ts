@@ -22,6 +22,7 @@ import { layoutText } from './textLayout';
 import type { TextMeasure } from './textLayout';
 import { graphemes, textContent } from './textModel';
 import type { ResolvedTextStyle } from './textModel';
+import { defaultRights, type RightsResolver } from './rights';
 
 export type ImageAssets = ReadonlyMap<string, CanvasImageSource>;
 const EMPTY_ASSETS: ImageAssets = new Map();
@@ -542,7 +543,9 @@ type Composition = {
   canvas: HTMLCanvasElement;
   base?: HTMLCanvasElement;
   mask?: HTMLCanvasElement;
+  kept?: HTMLCanvasElement;
   decoration?: CompositionDecoration;
+  rights: RightsResolver;
 };
 const compositions = new WeakMap<object, Composition>();
 const cropOverflows = new WeakMap<object, Composition>();
@@ -743,13 +746,15 @@ function compose(
   image: CanvasImageSource,
   assets: ImageAssets,
   decoration?: CompositionDecoration,
-  cache = compositions
+  cache = compositions,
+  rights: RightsResolver = defaultRights
 ) {
   const cached = cache.get(image);
   if (
     cached?.doc === doc &&
     cached.assets === assets &&
-    cached.decoration === decoration
+    cached.decoration === decoration &&
+    cached.rights === rights
   )
     return cached.canvas;
   const canvas = cached?.canvas ?? surface(doc.width, doc.height).canvas;
@@ -785,7 +790,8 @@ function compose(
   ctx.drawImage(filteredSource(image, doc.effects), 0, 0);
   ctx.restore();
   let base = cached?.base,
-    mask = cached?.mask;
+    mask = cached?.mask,
+    kept = cached?.kept;
   if (doc.layers.some((layer) => layer.erase && !layer.hidden)) {
     base ??= surface(doc.width, doc.height).canvas;
     if (base.width !== doc.width || base.height !== doc.height) {
@@ -797,7 +803,7 @@ function compose(
     baseContext.drawImage(canvas, 0, 0);
     mask ??= surface(doc.width, doc.height).canvas;
   }
-  doc.layers.forEach((layer) => {
+  doc.layers.forEach((layer, index) => {
     renderLayer(ctx, layer, assets);
     if (layer.erase && !layer.hidden && base && mask) {
       if (mask.width !== doc.width || mask.height !== doc.height) {
@@ -808,7 +814,25 @@ function compose(
       maskContext.clearRect(0, 0, doc.width, doc.height);
       renderLayer(maskContext, { ...layer, erase: false }, assets);
       maskContext.globalCompositeOperation = 'source-in';
-      maskContext.drawImage(base, 0, 0);
+      // Layers that deny erasing come back with the photo, in their stacking order.
+      const protectedLayers = doc.layers
+        .slice(0, index)
+        .filter((item) => !item.erase && !item.hidden && !rights(item).erase);
+      let restore: HTMLCanvasElement = base;
+      if (protectedLayers.length) {
+        kept ??= surface(doc.width, doc.height).canvas;
+        if (kept.width !== doc.width || kept.height !== doc.height) {
+          kept.width = doc.width;
+          kept.height = doc.height;
+        }
+        const keptContext = kept.getContext('2d')!;
+        keptContext.clearRect(0, 0, doc.width, doc.height);
+        keptContext.drawImage(base, 0, 0);
+        for (const item of protectedLayers)
+          renderLayer(keptContext, item, assets);
+        restore = kept;
+      }
+      maskContext.drawImage(restore, 0, 0);
       // Restore the original photo under the erased markup. Additive compositing
       // after destination-out also preserves semitransparent photo pixels exactly.
       ctx.save();
@@ -822,7 +846,16 @@ function compose(
   paintFrame(ctx, frameDoc);
   ctx.restore();
   ctx.restore();
-  cache.set(image, { doc, assets, canvas, base, mask, decoration });
+  cache.set(image, {
+    doc,
+    assets,
+    canvas,
+    base,
+    mask,
+    kept,
+    decoration,
+    rights,
+  });
   return canvas;
 }
 
@@ -834,7 +867,8 @@ export function paintCropPreview(
   image: CanvasImageSource,
   crop: Rect,
   assets: ImageAssets = EMPTY_ASSETS,
-  options: CropOptions = {}
+  options: CropOptions = {},
+  rights: RightsResolver = defaultRights
 ) {
   if (
     !ctx.canvas.width ||
@@ -887,7 +921,7 @@ export function paintCropPreview(
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.drawImage(
-    compose(overflow, image, assets, undefined, cropOverflows),
+    compose(overflow, image, assets, undefined, cropOverflows, rights),
     0,
     0,
     ctx.canvas.width,
@@ -914,7 +948,7 @@ export function paintCropPreview(
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.drawImage(
-    compose(overflow, image, assets, decoration, cropSelections),
+    compose(overflow, image, assets, decoration, cropSelections, rights),
     0,
     0,
     ctx.canvas.width,
@@ -929,18 +963,24 @@ export function paintDocument(
   doc: ImageDocument,
   image: CanvasImageSource,
   view: Matrix = [1, 0, 0, 1, 0, 0],
-  assets: ImageAssets = EMPTY_ASSETS
+  assets: ImageAssets = EMPTY_ASSETS,
+  rights: RightsResolver = defaultRights
 ) {
   ctx.save();
   apply(ctx, view);
-  ctx.drawImage(compose(doc, image, assets), 0, 0);
+  ctx.drawImage(
+    compose(doc, image, assets, undefined, compositions, rights),
+    0,
+    0
+  );
   ctx.restore();
 }
 export function exportCanvas(
   doc: ImageDocument,
   image: CanvasImageSource,
   options: ImageExportOptions = {},
-  assets: ImageAssets = EMPTY_ASSETS
+  assets: ImageAssets = EMPTY_ASSETS,
+  rights: RightsResolver = defaultRights
 ): HTMLCanvasElement {
   const size = resolveExportSize(doc, options),
     { canvas, ctx } = surface(size.width, size.height),
@@ -953,7 +993,7 @@ export function exportCanvas(
   }
   ctx.imageSmoothingEnabled = options.resampling !== 'pixelated';
   ctx.imageSmoothingQuality = 'high';
-  let source = compose(doc, image, assets),
+  let source = compose(doc, image, assets, undefined, compositions, rights),
     rect = size.sourceRect;
   // Repeated halving prevents single-pass downsampling from dropping thin detail.
   if (options.resampling !== 'pixelated') {

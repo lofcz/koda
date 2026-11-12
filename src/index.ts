@@ -14,6 +14,12 @@ export {
   cropOutputSize,
   CropConstraintError,
 } from './crop';
+export {
+  LAYER_RIGHTS,
+  parseLayerRights,
+  parseLayerRightsDefaults,
+  resolveLayerRights,
+} from './rights';
 export { RichTextInput } from './RichTextInput';
 export type {
   RichTextInputProps,

@@ -28,6 +28,11 @@ try {
     let rejected = false;
     try { api.parseDocument({ ...original, imageMatrix: [0,0,0,0,0,0] }); } catch { rejected = true; }
     if (!rejected) throw Error('Invalid transform accepted');
+    const withRights = api.parseDocument({ ...original, layers: [{ id: 'a', kind: 'text', matrix: [1,0,0,1,0,0], width: 10, height: 10, text: 'a', rights: { move: false } }] });
+    if (withRights.layers[0].rights.move !== false || api.resolveLayerRights(withRights.layers[0]).delete !== true) throw Error('Rights lost');
+    rejected = false;
+    try { api.parseLayerRights({ fly: false }); } catch { rejected = true; }
+    if (!rejected) throw Error('Unknown right accepted');
     console.log('document module works without React or DOM');
   `;
   for (const [format, statement] of [
